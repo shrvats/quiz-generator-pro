@@ -24,7 +24,7 @@ def process_pdf(file_path: str) -> List[Dict]:
     for page_num in range(2, len(doc)):
         page = doc[page_num]
         text = page.get_text("text")
-        text = re.sub(r'Page \d+|©.*', '', text)
+        text = re.sub(r'Page \d+|©.*|CONFIDENTIAL', '', text)
         
         for line in text.split('\n'):
             line = line.strip()
@@ -72,3 +72,4 @@ async def handle_pdf(file: UploadFile):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
