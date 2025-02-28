@@ -6,7 +6,7 @@ import tempfile
 import os
 from typing import List, Dict
 
-
+app = FastAPI()
 
 
 
