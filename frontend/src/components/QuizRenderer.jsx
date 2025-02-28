@@ -80,7 +80,7 @@ export default function QuizRenderer() {
             <div className="question">
               {q.question}
               {q.math?.map((formula, i) => (
-                <MathJax key={i} dynamic>{`\\(${formula}\\)`}</MathJax> {/* Added dynamic prop */}
+                <MathJax key={i} dynamic>{`\\(${formula}\\)`}</MathJax> 
               ))}
             </div>
             
