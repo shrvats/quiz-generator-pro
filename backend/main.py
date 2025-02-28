@@ -4,9 +4,9 @@ import fitz  # PyMuPDF
 import re
 import tempfile
 import os
-from typing import List, Dict
 import asyncio
 import traceback
+from typing import List, Dict, Union, Optional
 
 app = FastAPI()
 
@@ -27,182 +27,218 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
+def parse_html_table(table_html: str) -> List[List[str]]:
+    """Parse HTML table into a 2D array of text"""
+    rows = []
+    current_row = []
+    in_row = False
+    in_cell = False
+    cell_content = ""
+    
+    for line in table_html.split('\n'):
+        if '<tr>' in line:
+            in_row = True
+            current_row = []
+        elif '</tr>' in line:
+            in_row = False
+            if current_row:
+                rows.append(current_row)
+        elif '<td>' in line or '<th>' in line:
+            in_cell = True
+            cell_content = line.replace('<td>', '').replace('<th>', '').replace('</td>', '').replace('</th>', '').strip()
+            if '</td>' in line or '</th>' in line:
+                in_cell = False
+                current_row.append(cell_content)
+        elif '</td>' in line or '</th>' in line:
+            in_cell = False
+            current_row.append(cell_content)
+            cell_content = ""
+        elif in_cell:
+            cell_content += " " + line.strip()
+    
+    return rows
+
+def extract_table_from_text(text: str) -> Optional[str]:
+    """Try to extract a table from text by looking for patterns of whitespace alignment"""
+    lines = text.split('\n')
+    
+    # Look for lines with multiple consecutive spaces or tab characters
+    table_lines = []
+    in_table = False
+    
+    for line in lines:
+        # Check if line has multiple spaces or tabs that might indicate a table column
+        if re.search(r'\s{3,}', line) or '\t' in line:
+            if not in_table:
+                in_table = True
+            table_lines.append(line)
+        elif in_table and line.strip():
+            # Still in table if line is not empty
+            table_lines.append(line)
+        elif in_table:
+            # End of table if we were in a table and hit an empty line
+            in_table = False
+    
+    if not table_lines:
+        return None
+        
+    # Convert detected table to HTML
+    html = "<table border='1'>\n"
+    
+    for line in table_lines:
+        # Split by multiple spaces or tabs
+        cells = re.split(r'\s{2,}|\t+', line.strip())
+        cells = [cell.strip() for cell in cells if cell.strip()]
+        
+        if cells:
+            html += "<tr>\n"
+            for cell in cells:
+                html += f"  <td>{cell}</td>\n"
+            html += "</tr>\n"
+    
+    html += "</table>"
+    return html
+
 def process_pdf(file_path: str) -> List[Dict]:
     try:
         doc = fitz.open(file_path)
         questions = []
-        current_q = None
         
-        # First, extract all text from the PDF for debugging
+        # Extract full text
         full_text = ""
         for page_num in range(len(doc)):
             page = doc[page_num]
-            page_text = page.get_text("text")
-            full_text += page_text
+            text = page.get_text("text")
+            full_text += text + "\n\n"
+        
+        # Split text into question blocks
+        # Looking for pattern Q.XXXX or Q XXXX at the start of a line
+        question_pattern = re.compile(r'Q\.?\s*\d+\s+', re.IGNORECASE)
+        
+        # Find all matches
+        matches = list(question_pattern.finditer(full_text))
+        
+        # Extract the text for each question
+        for i, match in enumerate(matches):
+            start_pos = match.start()
             
-            # Print first 500 chars of each page for debugging
-            print(f"===== PAGE {page_num+1} SAMPLE TEXT =====")
-            print(page_text[:500])
-            print(f"====================================")
-        
-        # Print total text length for debugging
-        print(f"Total text length: {len(full_text)} characters")
-        
-        # Look for questions in the entire document
-        # Try multiple pattern matching approaches
-        
-        # Approach 1: Q1, Q2, etc. pattern
-        print("Trying Q1/Q2 pattern matching...")
-        q_pattern1 = re.compile(r'Q\s*(\d+)[.:]?\s*([^\n]+)', re.MULTILINE)
-        matches1 = list(q_pattern1.finditer(full_text))
-        print(f"Found {len(matches1)} potential questions with pattern 1")
-        
-        if matches1:
-            for match in matches1:
-                q_num = match.group(1)
-                q_text = match.group(2).strip()
-                print(f"Found Q{q_num}: {q_text[:50]}...")
-                
-                # Extract the text that follows this question until the next question
-                start_pos = match.end()
-                next_match = None
-                for next_q in matches1:
-                    if next_q.start() > start_pos:
-                        next_match = next_q
-                        break
-                
-                if next_match:
-                    q_content = full_text[start_pos:next_match.start()]
-                else:
-                    q_content = full_text[start_pos:]
-                
-                # Now parse the content for options and answers
-                options = {}
-                correct = ""
-                explanation = ""
-                
-                # Extract options (A, B, C, D)
-                opt_pattern = re.compile(r'([A-D])[.)]?\s*([^\n]+)')
-                for opt_match in opt_pattern.finditer(q_content):
-                    opt_letter = opt_match.group(1)
-                    opt_text = opt_match.group(2).strip()
-                    options[opt_letter] = opt_text
-                
-                # Extract correct answer
-                if "correct answer:" in q_content.lower():
-                    correct_match = re.search(r'correct answer:\s*([^\n]+)', q_content, re.IGNORECASE)
-                    if correct_match:
-                        correct = correct_match.group(1).strip()
-                
-                # Extract explanation
-                if "things to remember:" in q_content.lower():
-                    expl_match = re.search(r'things to remember:\s*([^\n]+)', q_content, re.IGNORECASE)
-                    if expl_match:
-                        explanation = expl_match.group(1).strip()
-                
-                # Create question dict
-                question = {
-                    'id': int(q_num),
-                    'question': q_text,
-                    'options': options,
-                    'correct': correct,
-                    'explanation': explanation,
-                    'math': [],
-                    'tables': []
-                }
-                
-                # Add to questions list
-                questions.append(question)
-        
-        # If no questions found with first approach, try more patterns
-        if not questions:
-            print("Trying alternative Question/Answer pattern...")
-            # Look for "Question 1", "Question 2", etc.
-            q_pattern2 = re.compile(r'(?:Question|QUESTION)\s*(\d+)[.:]?\s*([^\n]+)', re.MULTILINE)
-            matches2 = list(q_pattern2.finditer(full_text))
-            print(f"Found {len(matches2)} potential questions with pattern 2")
+            # Determine end position (start of next question or end of text)
+            if i < len(matches) - 1:
+                end_pos = matches[i+1].start()
+            else:
+                end_pos = len(full_text)
             
-            # Process similar to above...
-            # (pattern 2 processing would be similar to pattern 1)
-        
-        # If still no questions, try a more general approach
-        if not questions:
-            print("Using line-by-line approach for question detection...")
-            lines = full_text.split('\n')
-            for i, line in enumerate(lines):
+            # Extract question text
+            question_text = full_text[start_pos:end_pos]
+            
+            # Extract question ID
+            q_id_match = re.match(r'Q\.?\s*(\d+)', question_text)
+            q_id = q_id_match.group(1) if q_id_match else f"{i+1}"
+            
+            print(f"Processing Question {q_id}")
+            
+            # Try to extract the main question text (everything before options)
+            lines = question_text.split('\n')
+            main_question = ""
+            options = {}
+            correct_answer = ""
+            explanation = ""
+            things_to_remember = []
+            
+            # Check for tables in the question
+            table_html = extract_table_from_text(question_text)
+            
+            # Process line by line
+            in_options = False
+            option_lines = []
+            current_section = "question"
+            
+            for j, line in enumerate(lines):
                 line = line.strip()
                 if not line:
                     continue
                 
-                # Check if line looks like a question start
-                if re.match(r'^(?:Q|Question)\s*\d+', line, re.IGNORECASE):
-                    print(f"Potential question found: {line[:50]}...")
-                    # Process this question...
-                    # (remainder of processing would go here)
-        
-        # If we still have no questions, try a very broad approach
-        if not questions:
-            print("WARNING: No questions found with standard patterns, using fallback method")
-            # Just try to extract any text that might be a question...
-            # This is a last resort approach
-            
-            # Try with very simple Q1, Q2 pattern
-            q_pattern_simple = re.compile(r'Q(\d+)[:\.]?\s*(.*?)(?=Q\d+|$)', re.DOTALL)
-            matches_simple = list(q_pattern_simple.finditer(full_text))
-            print(f"Simple pattern found {len(matches_simple)} potential questions")
-            
-            for match in matches_simple:
-                q_num = match.group(1)
-                q_content = match.group(2).strip()
-                
-                # Split this into lines
-                content_lines = q_content.split('\n')
-                if not content_lines:
+                # Skip the question ID line if it's alone
+                if j == 0 and re.match(r'Q\.?\s*\d+\s*$', line):
                     continue
                 
-                # First line is the question
-                q_text = content_lines[0].strip()
-                options = {}
-                correct = ""
-                explanation = ""
+                # Check for option lines (A., B., C., D.)
+                if re.match(r'^[A-D]\.\s+', line):
+                    in_options = True
+                    option_letter = line[0]
+                    option_text = line[3:].strip()
+                    options[option_letter] = option_text
+                    option_lines.append(j)
+                    current_section = "options"
                 
-                # Process remaining lines for options, correct answer, etc.
-                for line in content_lines[1:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    # Check for options
-                    if opt_match := re.match(r'^([A-D])[.)]?\s*(.*)', line):
-                        opt_letter = opt_match.group(1)
-                        opt_text = opt_match.group(2).strip()
-                        options[opt_letter] = opt_text
-                    
-                    # Check for correct answer
-                    elif "correct answer:" in line.lower():
-                        correct = line.split(":", 1)[1].strip()
-                    
-                    # Check for explanation
-                    elif "things to remember:" in line.lower():
-                        explanation = line.split(":", 1)[1].strip()
+                # Check for "The correct answer is X" line
+                elif "correct answer is" in line.lower():
+                    # Extract the letter
+                    answer_match = re.search(r'correct answer is ([A-D])', line, re.IGNORECASE)
+                    if answer_match:
+                        correct_answer = answer_match.group(1)
+                    current_section = "answer"
                 
-                # Create question dict
-                question = {
-                    'id': int(q_num),
-                    'question': q_text,
-                    'options': options,
-                    'correct': correct,
-                    'explanation': explanation,
-                    'math': [],
-                    'tables': []
-                }
+                # Check for "Things to Remember" section
+                elif "things to remember" in line.lower():
+                    current_section = "things_to_remember"
+                    # Extract text after "Things to Remember"
+                    remember_text = re.sub(r'^.*?things to remember\s*:?\s*', '', line, re.IGNORECASE)
+                    if remember_text:
+                        things_to_remember.append(remember_text)
                 
-                # Add to questions list
-                questions.append(question)
+                # Process line based on current section
+                elif current_section == "question" and not in_options:
+                    # Before we hit options, this is part of the main question
+                    if main_question:
+                        main_question += " " + line
+                    else:
+                        main_question = line
+                elif current_section == "things_to_remember":
+                    # In the "Things to Remember" section
+                    if line.startswith("•"):
+                        # Bullet point
+                        things_to_remember.append(line[1:].strip())
+                    else:
+                        # Regular text - append to last item or start new
+                        if things_to_remember:
+                            things_to_remember[-1] += " " + line
+                        else:
+                            things_to_remember.append(line)
+                elif current_section == "answer" and not line.startswith("The correct answer is"):
+                    # After the answer line but before Things to Remember
+                    if explanation:
+                        explanation += " " + line
+                    else:
+                        explanation = line
+            
+            # If we didn't find a main question, use the first non-empty line
+            if not main_question:
+                for line in lines:
+                    if line.strip() and not line.startswith("Q."):
+                        main_question = line.strip()
+                        break
+            
+            # Create question object
+            question_obj = {
+                'id': int(q_id) if q_id.isdigit() else i + 1,
+                'question': main_question,
+                'options': options,
+                'correct': correct_answer,
+                'explanation': explanation,
+                'things_to_remember': things_to_remember,
+                'has_table': bool(table_html),
+                'table_html': table_html if table_html else None
+            }
+            
+            questions.append(question_obj)
         
-        # Print final question count and sample
-        print(f"Final question count: {len(questions)}")
-        for i, q in enumerate(questions[:3]):  # Print first 3 questions as sample
+        # Sort questions by ID
+        questions.sort(key=lambda q: q.get('id', 0))
+        
+        # Print summary
+        print(f"Extracted {len(questions)} questions")
+        for i, q in enumerate(questions[:3]):  # Show first 3
             print(f"Question {i+1}: {q['question'][:50]}...")
             print(f"Options: {list(q['options'].keys())}")
             print(f"Correct: {q['correct']}")
