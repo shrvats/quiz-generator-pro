@@ -1,11 +1,12 @@
 from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import fitz  # PyMuPDF
-import camelot
 import re
 import tempfile
 import os
 from typing import List, Dict
+import asyncio
+import concurrent.futures
 
 app = FastAPI()
 
@@ -26,68 +27,66 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
+def extract_text_from_page(doc, page_num):
+    """Extract text from a specific page"""
+    page = doc[page_num]
+    text = page.get_text("text")
+    return text
+
 def process_pdf(file_path: str) -> List[Dict]:
     try:
         doc = fitz.open(file_path)
         questions = []
         current_q = None
         
-        # Start from page 0 instead of 2 to handle all PDFs
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text")
-            text = re.sub(r'Page \d+|©.*', '', text)
+        # Create an executor for parallel processing
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Extract text from all pages in parallel
+            future_to_page = {
+                executor.submit(extract_text_from_page, doc, i): i 
+                for i in range(len(doc))
+            }
             
-            for line in text.split('\n'):
-                line = line.strip()
-                
-                if re.match(r'^Q\d*[.:]', line):
-                    if current_q: questions.append(current_q)
-                    current_q = {
-                        'question': re.sub(r'^Q\d*[.:]\s*', '', line),
-                        'options': {},
-                        'correct': '',
-                        'explanation': '',
-                        'tables': [],
-                        'math': []
-                    }
-                elif match := re.match(r'^([A-D])[.)]\s*(.+)', line):
-                    current_q['options'][match.group(1)] = match.group(2)
-                elif 'correct answer:' in line.lower():
-                    current_q['correct'] = line.split(':')[-1].strip()
-                elif 'things to remember:' in line.lower():
-                    current_q['explanation'] = line.split(':')[-1].strip()
-                
-                math = re.findall(r'\$(.*?)\$', line)
-                if math and current_q: current_q['math'].extend(math)
-            
-            # Only try to extract tables if we have a current question
-            # This reduces unnecessary processing
-            if current_q:
+            # Process each page as it completes
+            for future in concurrent.futures.as_completed(future_to_page):
+                page_num = future_to_page[future]
                 try:
-                    # Use lattice flavor first as it's faster for structured tables
-                    tables = camelot.read_pdf(
-                        file_path, 
-                        pages=str(page_num+1), 
-                        flavor='lattice',
-                        suppress_stdout=True
-                    )
+                    text = future.result()
+                    text = re.sub(r'Page \d+|©.*', '', text)
                     
-                    # If no tables found with lattice, try stream as fallback but with a timeout
-                    if len(tables) == 0:
-                        tables = camelot.read_pdf(
-                            file_path, 
-                            pages=str(page_num+1), 
-                            flavor='stream',
-                            suppress_stdout=True
-                        )
-                    
-                    if tables and len(tables) > 0:
-                        current_q['tables'] = [t.df.to_markdown() for t in tables]
+                    for line in text.split('\n'):
+                        line = line.strip()
+                        
+                        if re.match(r'^Q\d*[.:]', line):
+                            if current_q: 
+                                questions.append(current_q)
+                            current_q = {
+                                'question': re.sub(r'^Q\d*[.:]\s*', '', line),
+                                'options': {},
+                                'correct': '',
+                                'explanation': '',
+                                'math': []
+                            }
+                        elif match := re.match(r'^([A-D])[.)]\s*(.+)', line):
+                            if current_q:  # Make sure we have a current question
+                                current_q['options'][match.group(1)] = match.group(2)
+                        elif 'correct answer:' in line.lower():
+                            if current_q:
+                                current_q['correct'] = line.split(':')[-1].strip()
+                        elif 'things to remember:' in line.lower():
+                            if current_q:
+                                current_q['explanation'] = line.split(':')[-1].strip()
+                        
+                        math = re.findall(r'\$(.*?)\$', line)
+                        if math and current_q: 
+                            current_q['math'].extend(math)
+                
                 except Exception as e:
-                    print(f"Table extraction error on page {page_num+1}: {str(e)}")
+                    print(f"Error processing page {page_num}: {str(e)}")
         
-        if current_q: questions.append(current_q)
+        if current_q: 
+            questions.append(current_q)
+        
         return questions
     except Exception as e:
         print(f"PDF processing error: {str(e)}")
@@ -103,7 +102,10 @@ async def handle_pdf(file: UploadFile):
             tmp_path = tmp.name
         
         print(f"Processing file at: {tmp_path}")
-        result = process_pdf(tmp_path)
+        # Handle PDF processing in a way that doesn't block
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, process_pdf, tmp_path)
+        
         os.unlink(tmp_path)
         print(f"Processed {len(result)} questions")
         return result
