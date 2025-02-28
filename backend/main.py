@@ -11,6 +11,13 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[
+        "https://quiz-generator-gg7ile9gh-shreyas-projects-7e4ad642.vercel.app",  # Your Vercel domain
+        "https://quiz-generator.vercel.app",  # Common production domain format
+        "http://localhost:5173",  # Vite dev server
+        "http://localhost:3000"   # React dev server
+    ],
+    allow_credentials=True,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
