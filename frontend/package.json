@@ -12,10 +12,11 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "axios": "^1.6.2",
-    "mathjax3-react": "^1.2.0"
+    "better-react-mathjax": "^2.0.3"
   },
   "devDependencies": {
     "vite": "^5.0.0",
     "@vitejs/plugin-react": "^4.0.0"
   }
 }
+
