@@ -9,22 +9,30 @@ from typing import List, Dict
 
 app = FastAPI()
 
-# CONFIGURE CORS - THIS IS CRITICAL
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def add_cors_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
 def process_pdf(file_path: str) -> List[Dict]:
-    # Your existing PDF processing code
     try:
         doc = fitz.open(file_path)
         questions = []
         current_q = None
         
+        # Start from page 0 instead of 2 to handle all PDFs
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
@@ -53,11 +61,31 @@ def process_pdf(file_path: str) -> List[Dict]:
                 math = re.findall(r'\$(.*?)\$', line)
                 if math and current_q: current_q['math'].extend(math)
             
-            try:
-                tables = camelot.read_pdf(file_path, pages=str(page_num+1), flavor='stream')
-                if tables and current_q: current_q['tables'] = [t.df.to_markdown() for t in tables]
-            except Exception as e:
-                print(f"Table extraction error on page {page_num+1}: {str(e)}")
+            # Only try to extract tables if we have a current question
+            # This reduces unnecessary processing
+            if current_q:
+                try:
+                    # Use lattice flavor first as it's faster for structured tables
+                    tables = camelot.read_pdf(
+                        file_path, 
+                        pages=str(page_num+1), 
+                        flavor='lattice',
+                        suppress_stdout=True
+                    )
+                    
+                    # If no tables found with lattice, try stream as fallback but with a timeout
+                    if len(tables) == 0:
+                        tables = camelot.read_pdf(
+                            file_path, 
+                            pages=str(page_num+1), 
+                            flavor='stream',
+                            suppress_stdout=True
+                        )
+                    
+                    if tables and len(tables) > 0:
+                        current_q['tables'] = [t.df.to_markdown() for t in tables]
+                except Exception as e:
+                    print(f"Table extraction error on page {page_num+1}: {str(e)}")
         
         if current_q: questions.append(current_q)
         return questions
@@ -92,7 +120,7 @@ def health_check():
 def read_root():
     return {"message": "PDF Quiz Generator API"}
 
-# Always handle OPTIONS requests
+# Handle OPTIONS requests
 @app.options("/{path:path}")
 async def options_route(request: Request, path: str):
     return {}
