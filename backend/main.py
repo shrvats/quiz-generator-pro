@@ -31,7 +31,7 @@ def process_pdf(file_path: str) -> List[Dict]:
     questions = []
     current_q = None
     
-    for page_num in range(len(doc)):
+    for page_num in range(2, len(doc)):
         page = doc[page_num]
         text = page.get_text("text")
         text = re.sub(r'Page \d+|©.*', '', text)
@@ -86,3 +86,4 @@ def health_check():
 @app.get("/")
 def read_root():
     return {"message": "PDF Quiz Generator API"}
+
