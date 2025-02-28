@@ -4,6 +4,7 @@ import { MathJax } from 'better-react-mathjax';
 
 // CORRECT backend URL
 const BACKEND_URL = "https://quiz-generator-pro.onrender.com";
+const MAX_TIMEOUT = 180000; // 3 minutes timeout
 
 export default function QuizRenderer() {
   const [quiz, setQuiz] = useState([]);
@@ -12,12 +13,13 @@ export default function QuizRenderer() {
   const [backendStatus, setBackendStatus] = useState('Checking...');
   const [processingTime, setProcessingTime] = useState(0);
   const [processingTimer, setProcessingTimer] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [stage, setStage] = useState('idle'); // idle, uploading, processing
 
   // Check backend health on load
   useEffect(() => {
     console.log("Testing backend connection...");
     
-    // Try direct connection
     fetch(`${BACKEND_URL}/health`)
       .then(res => {
         if (!res.ok) {
@@ -51,6 +53,8 @@ export default function QuizRenderer() {
     setLoading(true);
     setError(null);
     setProcessingTime(0);
+    setUploadProgress(0);
+    setStage('uploading');
     
     // Start a timer to show processing time
     const timer = setInterval(() => {
@@ -64,27 +68,65 @@ export default function QuizRenderer() {
       const formData = new FormData();
       formData.append('file', file);
       
-      // Use direct backend URL for file uploads with extended timeout (2 minutes)
+      // Use direct backend URL for file uploads with extended timeout
       console.log(`Uploading file to ${BACKEND_URL}/process`);
+      
+      setStage('processing');
+      
       const { data } = await axios.post(
         `${BACKEND_URL}/process`,
         formData,
         { 
           headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: 120000 // 2 minute timeout
+          timeout: MAX_TIMEOUT, // Extended timeout
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            setUploadProgress(percentCompleted);
+            if (percentCompleted === 100) {
+              setStage('processing');
+            }
+          }
         }
       );
       
       console.log("Received quiz data:", data);
       setQuiz(data);
+      setStage('complete');
     } catch (err) {
       console.error('Upload failed:', err);
-      setError(`Upload failed: ${err.message || 'Unknown error'}`);
+      
+      let errorMessage = 'Unknown error';
+      
+      if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+        errorMessage = `Processing timed out after ${MAX_TIMEOUT/1000} seconds. Try a smaller PDF or one with fewer questions.`;
+      } else if (err.response) {
+        errorMessage = `Server error: ${err.response.status} ${err.response.statusText}`;
+        if (err.response.data && err.response.data.detail) {
+          errorMessage += ` - ${err.response.data.detail}`;
+        }
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+      
+      setError(`Upload failed: ${errorMessage}`);
+      setStage('error');
     } finally {
       setLoading(false);
       clearInterval(timer);
       setProcessingTimer(null);
     }
+  };
+
+  const getProgressPercentage = () => {
+    if (stage === 'uploading') {
+      return uploadProgress;
+    } else if (stage === 'processing') {
+      // Show a pulsing progress bar during processing
+      return Math.min((processingTime / (MAX_TIMEOUT/1000)) * 100, 95);
+    }
+    return 0;
   };
 
   return (
@@ -122,9 +164,14 @@ export default function QuizRenderer() {
         
         {loading && (
           <div style={{ marginBottom: '20px' }}>
-            <p>Processing PDF... ({processingTime} seconds elapsed)</p>
+            <p>
+              {stage === 'uploading' ? `Uploading PDF (${uploadProgress}%)...` : 
+               `Processing PDF... (${processingTime} seconds elapsed)`}
+            </p>
             <p style={{ fontSize: '0.9em', color: '#555' }}>
-              PDF processing may take up to 2 minutes depending on file size and complexity.
+              {stage === 'uploading' ? 
+                'Uploading your PDF to the server...' : 
+                'PDF processing may take up to 3 minutes depending on file size and complexity.'}
             </p>
             <div style={{ 
               width: '100%', 
@@ -135,15 +182,41 @@ export default function QuizRenderer() {
               marginTop: '10px'
             }}>
               <div style={{
-                width: `${Math.min(processingTime/120 * 100, 100)}%`,
+                width: `${getProgressPercentage()}%`,
                 height: '100%',
                 backgroundColor: '#1a237e',
-                transition: 'width 0.3s ease'
+                transition: 'width 0.5s ease',
+                animation: stage === 'processing' ? 'pulse 2s infinite' : 'none'
               }}></div>
             </div>
+            <style jsx>{`
+              @keyframes pulse {
+                0% { opacity: 0.6; }
+                50% { opacity: 1; }
+                100% { opacity: 0.6; }
+              }
+            `}</style>
           </div>
         )}
-        {error && <p style={{color: 'red'}}>{error}</p>}
+        {error && (
+          <div style={{
+            color: 'red',
+            padding: '15px',
+            backgroundColor: '#ffebee',
+            borderRadius: '4px',
+            marginBottom: '20px'
+          }}>
+            <p><strong>Error:</strong> {error}</p>
+            <p style={{ fontSize: '0.9em', marginTop: '10px' }}>
+              Suggestions:
+              <ul>
+                <li>Try with a smaller PDF file</li>
+                <li>Ensure the PDF contains properly formatted questions</li>
+                <li>Check if the backend service is running</li>
+              </ul>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="quiz-grid">
