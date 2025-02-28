@@ -9,31 +9,22 @@ from typing import List, Dict
 
 app = FastAPI()
 
-# Enhanced CORS configuration
+# CONFIGURE CORS - THIS IS CRITICAL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=["*"]  # Expose all headers
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
-@app.middleware("http")
-async def add_cors_header(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    return response
-
 def process_pdf(file_path: str) -> List[Dict]:
+    # Your existing PDF processing code
     try:
         doc = fitz.open(file_path)
         questions = []
         current_q = None
         
-        # Start from page 0 instead of 2 to handle all PDFs
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
@@ -101,7 +92,7 @@ def health_check():
 def read_root():
     return {"message": "PDF Quiz Generator API"}
 
-# Add an options handler for CORS preflight requests
+# Always handle OPTIONS requests
 @app.options("/{path:path}")
-async def options_handler(request: Request, path: str):
+async def options_route(request: Request, path: str):
     return {}
