@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import axios from 'axios'
-import { MathJaxFormula } from 'mathjax3-react'
+import { MathJax } from 'better-react-mathjax'
 
 export default function QuizRenderer() {
   const [quiz, setQuiz] = useState([])
@@ -46,7 +46,9 @@ export default function QuizRenderer() {
             <div className="question">
               {q.question}
               {q.math.map((formula, i) => (
-                <MathJaxFormula key={i} formula={`$$${formula}$$`} />
+                <MathJax key={i} inline dynamic>
+                  {`\\(${formula}\\)`}
+                </MathJax>
               ))}
             </div>
             
@@ -68,7 +70,7 @@ export default function QuizRenderer() {
               <strong>Correct Answer:</strong> {q.correct}
               {q.explanation && (
                 <div className="explanation">
-                  <MathJaxFormula formula={q.explanation} />
+                  <MathJax dynamic>{q.explanation}</MathJax>
                 </div>
               )}
             </div>
@@ -78,3 +80,4 @@ export default function QuizRenderer() {
     </>
   )
 }
+
