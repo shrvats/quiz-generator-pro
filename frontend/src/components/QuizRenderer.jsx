@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJax } from 'better-react-mathjax';
 
-// Direct backend URL - use this instead of proxy
+// Backend connection options
 const BACKEND_URL = "https://quiz-backend-pro.onrender.com";
+const USE_PROXY = true; // Toggle between direct connection and proxy
+const API_ENDPOINT = USE_PROXY ? "/api/proxy" : BACKEND_URL;
 
 export default function QuizRenderer() {
   const [quiz, setQuiz] = useState([]);
@@ -15,8 +17,8 @@ export default function QuizRenderer() {
   useEffect(() => {
     console.log("Testing backend connection...");
     
-    // Try direct connection
-    fetch(`${BACKEND_URL}/health`)
+    // Try connection based on selected method
+    fetch(`${API_ENDPOINT}/health`)
       .then(res => {
         if (!res.ok) {
           throw new Error(`Status: ${res.status}`);
@@ -28,8 +30,22 @@ export default function QuizRenderer() {
         setBackendStatus('Connected ✅');
       })
       .catch(err => {
-        console.error("Direct backend connection failed:", err);
+        console.error("Backend connection failed:", err);
         setBackendStatus(`Failed to connect ❌ (${err.message})`);
+        
+        // If proxy fails, try direct connection as fallback
+        if (USE_PROXY) {
+          console.log("Trying direct connection as fallback...");
+          fetch(`${BACKEND_URL}/health`)
+            .then(res => res.json())
+            .then(data => {
+              console.log("Direct backend health check:", data);
+              setBackendStatus('Connected via fallback ✅');
+            })
+            .catch(directErr => {
+              console.error("Both connection methods failed");
+            });
+        }
       });
   }, []);
 
@@ -45,10 +61,9 @@ export default function QuizRenderer() {
       const formData = new FormData();
       formData.append('file', file);
       
-      // Use direct backend URL for file uploads
-      console.log(`Uploading file to ${BACKEND_URL}/process`);
+      console.log(`Uploading file to ${API_ENDPOINT}/process`);
       const { data } = await axios.post(
-        `${BACKEND_URL}/process`,
+        `${API_ENDPOINT}/process`,
         formData,
         { 
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -61,6 +76,31 @@ export default function QuizRenderer() {
     } catch (err) {
       console.error('Upload failed:', err);
       setError(`Upload failed: ${err.message || 'Unknown error'}`);
+      
+      // If using proxy and it fails, try direct connection
+      if (USE_PROXY) {
+        try {
+          console.log("Trying direct backend connection for upload...");
+          const formData = new FormData();
+          formData.append('file', file);
+          
+          const { data } = await axios.post(
+            `${BACKEND_URL}/process`,
+            formData,
+            { 
+              headers: { 'Content-Type': 'multipart/form-data' },
+              timeout: 60000
+            }
+          );
+          
+          console.log("Received quiz data from direct connection:", data);
+          setQuiz(data);
+          setError(null);
+        } catch (directErr) {
+          console.error('Direct upload also failed:', directErr);
+          setError(`All connection methods failed. Please try again later.`);
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -75,10 +115,9 @@ export default function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>Using direct backend connection</small></p>
+        <p><small>Connection method: {USE_PROXY ? 'API Proxy with fallback' : 'Direct backend connection'}</small></p>
       </div>
       
-      {/* Rest of your component remains the same */}
       <div className="upload-section">
         <h2>Upload PDF</h2>
         <input 
