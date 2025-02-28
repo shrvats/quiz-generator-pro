@@ -2,17 +2,21 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJax } from 'better-react-mathjax';
 
+// Direct backend URL - use this instead of proxy
+const BACKEND_URL = "https://quiz-backend-pro.onrender.com";
+
 export default function QuizRenderer() {
   const [quiz, setQuiz] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [backendStatus, setBackendStatus] = useState('Checking...');
 
-  // Debug backend connection on load
+  // Check backend health on load
   useEffect(() => {
     console.log("Testing backend connection...");
-    // Test if backend is reachable via proxy
-    fetch('/api/proxy/health')
+    
+    // Try direct connection
+    fetch(`${BACKEND_URL}/health`)
       .then(res => {
         if (!res.ok) {
           throw new Error(`Status: ${res.status}`);
@@ -24,7 +28,7 @@ export default function QuizRenderer() {
         setBackendStatus('Connected ✅');
       })
       .catch(err => {
-        console.error("Backend connection failed:", err);
+        console.error("Direct backend connection failed:", err);
         setBackendStatus(`Failed to connect ❌ (${err.message})`);
       });
   }, []);
@@ -41,14 +45,16 @@ export default function QuizRenderer() {
       const formData = new FormData();
       formData.append('file', file);
       
-      // Set longer timeout (3 minutes)
-      const axiosConfig = {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 180000 // 3 minutes
-      };
-      
-      console.log("Uploading file to /api/proxy/process...");
-      const { data } = await axios.post('/api/proxy/process', formData, axiosConfig);
+      // Use direct backend URL for file uploads
+      console.log(`Uploading file to ${BACKEND_URL}/process`);
+      const { data } = await axios.post(
+        `${BACKEND_URL}/process`,
+        formData,
+        { 
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 60000 // 60 second timeout
+        }
+      );
       
       console.log("Received quiz data:", data);
       setQuiz(data);
@@ -69,12 +75,12 @@ export default function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>API Endpoint: /api/proxy/process</small></p>
+        <p><small>Using direct backend connection</small></p>
       </div>
       
+      {/* Rest of your component remains the same */}
       <div className="upload-section">
         <h2>Upload PDF</h2>
-        <p>Upload a PDF with quiz questions to generate interactive content.</p>
         <input 
           type="file" 
           accept=".pdf" 
@@ -92,39 +98,8 @@ export default function QuizRenderer() {
           }}
         />
         
-        {loading && (
-          <div className="loading-indicator" style={{textAlign: 'center', padding: '20px'}}>
-            <p>Processing PDF... This may take up to 2 minutes for large files.</p>
-            <div className="spinner" style={{
-              border: '4px solid #f3f3f3',
-              borderTop: '4px solid #1a237e',
-              borderRadius: '50%',
-              width: '30px',
-              height: '30px',
-              animation: 'spin 1s linear infinite',
-              margin: '0 auto'
-            }}></div>
-            <style>{`
-              @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-              }
-            `}</style>
-          </div>
-        )}
-        
-        {error && (
-          <div style={{
-            color: 'white',
-            background: '#d32f2f',
-            padding: '15px',
-            borderRadius: '4px',
-            marginTop: '20px'
-          }}>
-            <strong>Error:</strong> {error}
-            <p>Try refreshing the page or checking if the backend is running.</p>
-          </div>
-        )}
+        {loading && <p>Processing PDF...</p>}
+        {error && <p style={{color: 'red'}}>{error}</p>}
       </div>
 
       <div className="quiz-grid">
