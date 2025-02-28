@@ -10,6 +10,12 @@ export default function App() {
         </h1>
         <QuizRenderer />
       </div>
+       <div className="container">
+      <h1 style={{ color: 'red', textAlign: 'center' }}>
+        TEST - If you see this, React is working
+      </h1>
+      <QuizRenderer />
+    </div>
     </MathJaxContext>
   )
 }
