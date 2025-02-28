@@ -5,7 +5,7 @@
   "functions": {
     "api/proxy/[...path].js": {
       "memory": 1024,
-      "maxDuration": 120
+      "maxDuration": 180
     }
   },
   "headers": [
