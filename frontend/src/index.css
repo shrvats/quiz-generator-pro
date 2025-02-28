@@ -30,11 +30,6 @@ body {
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
   padding: 2rem;
-  transition: transform 0.2s;
-}
-
-.card:hover {
-  transform: translateY(-2px);
 }
 
 .question {
@@ -52,13 +47,6 @@ body {
   margin: 0.5rem 0;
   border: 1px solid #ddd;
   border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.option:hover {
-  background: #f8f9fa;
-  border-color: var(--primary-blue);
 }
 
 .answer {
@@ -83,10 +71,10 @@ body {
   margin: 1rem 0;
 }
 
-input[type="file"] {
-  padding: 1rem;
-  border: 2px dashed var(--primary-blue);
-  border-radius: 4px;
-  width: 100%;
-  margin: 2rem 0;
+.upload-section {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
