@@ -1,5 +1,4 @@
 from fastapi import FastAPI, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import fitz  # PyMuPDF
 import camelot
 import re
@@ -7,32 +6,9 @@ import tempfile
 import os
 from typing import List, Dict
 
-app = FastAPI()
-app.use((req, res, next) == {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader(
-        "Access-Control-Allow-Methods",
-        "OPTIONS, GET, POST, PUT, PATCH, DELETE"
-      );
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-      if (req.method === "OPTIONS") {
-        return res.sendStatus(200);
-      }
-      next();
-    });
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://quiz-generator-gg7ile9gh-shreyas-projects-7e4ad642.vercel.app",  # Your Vercel domain
-        "https://quiz-generator.vercel.app",  # Common production domain format
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000"   # React dev server
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+
 
 def process_pdf(file_path: str) -> List[Dict]:
     doc = fitz.open(file_path)
