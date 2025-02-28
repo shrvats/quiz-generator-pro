@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import axios from 'axios'
-import MathJax from 'react-mathjax-preview'
+import { MathJaxFormula } from 'mathjax3-react'
 
 export default function QuizRenderer() {
   const [quiz, setQuiz] = useState([])
@@ -36,20 +36,9 @@ export default function QuizRenderer() {
         accept=".pdf" 
         onChange={handleFile}
         disabled={loading}
-        style={{ 
-          padding: '1.5rem',
-          border: '2px dashed #1a237e',
-          borderRadius: '8px',
-          cursor: 'pointer'
-        }}
       />
       
-      {loading && (
-        <div style={{ textAlign: 'center', margin: '2rem' }}>
-          <div className="loader"></div>
-          <p>Processing PDF...</p>
-        </div>
-      )}
+      {loading && <p>Processing PDF...</p>}
 
       <div className="quiz-grid">
         {quiz.map((q, idx) => (
@@ -57,9 +46,7 @@ export default function QuizRenderer() {
             <div className="question">
               {q.question}
               {q.math.map((formula, i) => (
-                <div key={i} style={{ margin: '1rem 0' }}>
-                  <MathJax math={`$$${formula}$$`} />
-                </div>
+                <MathJaxFormula key={i} formula={`$$${formula}$$`} />
               ))}
             </div>
             
@@ -72,16 +59,16 @@ export default function QuizRenderer() {
             <div className="options">
               {Object.entries(q.options).map(([opt, text]) => (
                 <div key={opt} className="option">
-                  <strong style={{ color: '#1a237e' }}>{opt}.</strong> {text}
+                  <strong>{opt}.</strong> {text}
                 </div>
               ))}
             </div>
 
             <div className="answer">
-              <strong style={{ color: '#2e7d32' }}>Correct Answer:</strong> {q.correct}
+              <strong>Correct Answer:</strong> {q.correct}
               {q.explanation && (
                 <div className="explanation">
-                  <MathJax math={q.explanation} />
+                  <MathJaxFormula formula={q.explanation} />
                 </div>
               )}
             </div>
