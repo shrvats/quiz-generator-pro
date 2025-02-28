@@ -9,21 +9,22 @@ from typing import List, Dict
 
 app = FastAPI()
 
-# CORS configuration
+# Enhanced CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"]  # Expose all headers
 )
 
 @app.middleware("http")
 async def add_cors_header(request: Request, call_next):
     response = await call_next(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
 
 def process_pdf(file_path: str) -> List[Dict]:
@@ -99,3 +100,8 @@ def health_check():
 @app.get("/")
 def read_root():
     return {"message": "PDF Quiz Generator API"}
+
+# Add an options handler for CORS preflight requests
+@app.options("/{path:path}")
+async def options_handler(request: Request, path: str):
+    return {}
