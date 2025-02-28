@@ -27,63 +27,75 @@ async def add_cors_header(request: Request, call_next):
     return response
 
 def process_pdf(file_path: str) -> List[Dict]:
-    doc = fitz.open(file_path)
-    questions = []
-    current_q = None
-    
-    for page_num in range(2, len(doc)):
-        page = doc[page_num]
-        text = page.get_text("text")
-        text = re.sub(r'Page \d+|©.*', '', text)
+    try:
+        doc = fitz.open(file_path)
+        questions = []
+        current_q = None
         
-        for line in text.split('\n'):
-            line = line.strip()
+        # Start from page 0 instead of 2 to handle all PDFs
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text")
+            text = re.sub(r'Page \d+|©.*', '', text)
             
-            if re.match(r'^Q\d*[.:]', line):
-                if current_q: questions.append(current_q)
-                current_q = {
-                    'question': re.sub(r'^Q\d*[.:]\s*', '', line),
-                    'options': {},
-                    'correct': '',
-                    'explanation': '',
-                    'tables': [],
-                    'math': []
-                }
-            elif match := re.match(r'^([A-D])[.)]\s*(.+)', line):
-                current_q['options'][match.group(1)] = match.group(2)
-            elif 'correct answer:' in line.lower():
-                current_q['correct'] = line.split(':')[-1].strip()
-            elif 'things to remember:' in line.lower():
-                current_q['explanation'] = line.split(':')[-1].strip()
+            for line in text.split('\n'):
+                line = line.strip()
+                
+                if re.match(r'^Q\d*[.:]', line):
+                    if current_q: questions.append(current_q)
+                    current_q = {
+                        'question': re.sub(r'^Q\d*[.:]\s*', '', line),
+                        'options': {},
+                        'correct': '',
+                        'explanation': '',
+                        'tables': [],
+                        'math': []
+                    }
+                elif match := re.match(r'^([A-D])[.)]\s*(.+)', line):
+                    current_q['options'][match.group(1)] = match.group(2)
+                elif 'correct answer:' in line.lower():
+                    current_q['correct'] = line.split(':')[-1].strip()
+                elif 'things to remember:' in line.lower():
+                    current_q['explanation'] = line.split(':')[-1].strip()
+                
+                math = re.findall(r'\$(.*?)\$', line)
+                if math and current_q: current_q['math'].extend(math)
             
-            math = re.findall(r'\$(.*?)\$', line)
-            if math: current_q['math'].extend(math)
+            try:
+                tables = camelot.read_pdf(file_path, pages=str(page_num+1), flavor='stream')
+                if tables and current_q: current_q['tables'] = [t.df.to_markdown() for t in tables]
+            except Exception as e:
+                print(f"Table extraction error on page {page_num+1}: {str(e)}")
         
-        tables = camelot.read_pdf(file_path, pages=str(page_num+1), flavor='stream')
-        if tables: current_q['tables'] = [t.df.to_markdown() for t in tables]
-    
-    if current_q: questions.append(current_q)
-    return questions
+        if current_q: questions.append(current_q)
+        return questions
+    except Exception as e:
+        print(f"PDF processing error: {str(e)}")
+        raise Exception(f"Failed to process PDF: {str(e)}")
 
 @app.post("/process")
 async def handle_pdf(file: UploadFile):
     try:
+        print(f"Received file: {file.filename}")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             tmp.write(content)
+            tmp_path = tmp.name
         
-        result = process_pdf(tmp.name)
-        os.unlink(tmp.name)
+        print(f"Processing file at: {tmp_path}")
+        result = process_pdf(tmp_path)
+        os.unlink(tmp_path)
+        print(f"Processed {len(result)} questions")
         return result
         
     except Exception as e:
+        print(f"Error processing PDF: {str(e)}")
         raise HTTPException(500, f"Processing failed: {str(e)}")
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "message": "API is running"}
 
 @app.get("/")
 def read_root():
     return {"message": "PDF Quiz Generator API"}
-
