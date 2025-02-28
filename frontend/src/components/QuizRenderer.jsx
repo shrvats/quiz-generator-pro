@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'; // Added React import
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJax } from 'better-react-mathjax';
 
@@ -9,9 +9,9 @@ export default function QuizRenderer() {
 
   // Debug backend connection on load
   useEffect(() => {
-    console.log("Backend URL:", import.meta.env.VITE_API_URL);
-    // Test if backend is reachable
-    fetch(`${import.meta.env.VITE_API_URL}/health`)
+    console.log("Testing backend connection...");
+    // Test if backend is reachable via proxy
+    fetch('/api/proxy/health')
       .then(res => res.json())
       .then(data => console.log("Backend health check:", data))
       .catch(err => console.error("Backend connection failed:", err));
@@ -29,7 +29,7 @@ export default function QuizRenderer() {
       formData.append('file', file);
       
       const { data } = await axios.post(
-        `${import.meta.env.VITE_API_URL}/process`,
+        '/api/proxy/process',
         formData,
         { headers: { 'Content-Type': 'multipart/form-data' } }
       );
@@ -46,11 +46,6 @@ export default function QuizRenderer() {
 
   return (
     <div className="container">
-      {/* Debug info - remove in production */}
-      <div style={{background: '#f0f0f0', padding: '10px', marginBottom: '20px'}}>
-        <p>Backend URL: {import.meta.env.VITE_API_URL || 'Not set'}</p>
-      </div>
-      
       <div className="upload-section">
         <h2>Upload PDF</h2>
         <input 
@@ -80,7 +75,7 @@ export default function QuizRenderer() {
             <div className="question">
               {q.question}
               {q.math?.map((formula, i) => (
-                <MathJax key={i} dynamic>{`\\(${formula}\\)`}</MathJax> 
+                <MathJax key={i} dynamic>{`\\(${formula}\\)`}</MathJax>
               ))}
             </div>
             
@@ -102,7 +97,7 @@ export default function QuizRenderer() {
               <strong>Correct Answer:</strong> {q.correct}
               {q.explanation && (
                 <div className="explanation">
-                  <MathJax dynamic>{q.explanation}</MathJax> {/* Added dynamic prop */}
+                  <MathJax dynamic>{q.explanation}</MathJax>
                 </div>
               )}
             </div>
@@ -112,3 +107,4 @@ export default function QuizRenderer() {
     </div>
   );
 }
+
