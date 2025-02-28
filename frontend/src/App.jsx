@@ -1,4 +1,4 @@
-import React from 'react'; // Added React import
+import React from 'react';
 import { MathJaxContext } from 'better-react-mathjax';
 import QuizRenderer from './components/QuizRenderer';
 
@@ -14,3 +14,4 @@ export default function App() {
     </MathJaxContext>
   );
 }
+
