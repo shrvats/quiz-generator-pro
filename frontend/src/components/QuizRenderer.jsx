@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react'
-import axios from 'axios'
-import { MathJax } from 'better-react-mathjax'
+import React, { useState, useEffect } from 'react'; // Added React import
+import axios from 'axios';
+import { MathJax } from 'better-react-mathjax';
 
 export default function QuizRenderer() {
-  const [quiz, setQuiz] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
+  const [quiz, setQuiz] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   // Debug backend connection on load
   useEffect(() => {
@@ -18,31 +18,31 @@ export default function QuizRenderer() {
   }, []);
 
   const handleFile = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
+    const file = e.target.files[0];
+    if (!file) return;
     
-    setLoading(true)
-    setError(null)
+    setLoading(true);
+    setError(null);
     
     try {
-      const formData = new FormData()
-      formData.append('file', file)
+      const formData = new FormData();
+      formData.append('file', file);
       
       const { data } = await axios.post(
         `${import.meta.env.VITE_API_URL}/process`,
         formData,
         { headers: { 'Content-Type': 'multipart/form-data' } }
-      )
+      );
       
-      setQuiz(data)
-      console.log("Received quiz data:", data)
+      setQuiz(data);
+      console.log("Received quiz data:", data);
     } catch (err) {
-      console.error('Upload failed:', err)
-      setError(`Upload failed: ${err.message}`)
+      console.error('Upload failed:', err);
+      setError(`Upload failed: ${err.message}`);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   return (
     <div className="container">
@@ -80,9 +80,7 @@ export default function QuizRenderer() {
             <div className="question">
               {q.question}
               {q.math?.map((formula, i) => (
-                <MathJax key={i} inline dynamic>
-                  {`\\(${formula}\\)`}
-                </MathJax>
+                <MathJax key={i} dynamic>{`\\(${formula}\\)`}</MathJax> {/* Added dynamic prop */}
               ))}
             </div>
             
@@ -104,7 +102,7 @@ export default function QuizRenderer() {
               <strong>Correct Answer:</strong> {q.correct}
               {q.explanation && (
                 <div className="explanation">
-                  <MathJax dynamic>{q.explanation}</MathJax>
+                  <MathJax dynamic>{q.explanation}</MathJax> {/* Added dynamic prop */}
                 </div>
               )}
             </div>
@@ -112,5 +110,5 @@ export default function QuizRenderer() {
         ))}
       </div>
     </div>
-  )
+  );
 }
