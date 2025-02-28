@@ -8,7 +8,7 @@ import os
 from typing import List, Dict
 
 app = FastAPI()
-app.use((req, res, next) => {
+app.use((req, res, next) == {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader(
         "Access-Control-Allow-Methods",
