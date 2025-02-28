@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 import fitz  # PyMuPDF
 import camelot
 import re
@@ -8,17 +9,32 @@ from typing import List, Dict
 
 app = FastAPI()
 
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+@app.middleware("http")
+async def add_cors_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 def process_pdf(file_path: str) -> List[Dict]:
     doc = fitz.open(file_path)
     questions = []
     current_q = None
     
-    for page_num in range(2, len(doc)):
+    for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text("text")
-        text = re.sub(r'Page \d+|©.*|CONFIDENTIAL', '', text)
+        text = re.sub(r'Page \d+|©.*', '', text)
         
         for line in text.split('\n'):
             line = line.strip()
@@ -63,12 +79,10 @@ async def handle_pdf(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Processing failed: {str(e)}")
 
-@app.get("/")
-def read_root():
-    return {"message": "PDF Quiz Generator API is running"}
-
-
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
+@app.get("/")
+def read_root():
+    return {"message": "PDF Quiz Generator API"}
