@@ -1,70 +1,69 @@
-// File path: /api/proxy/[...path].js
+// File: pages/api/proxy/[...path].js
 export default async function handler(req, res) {
-  // Log the request information
-  console.log(`Proxy request: ${req.method} ${req.url}`);
-  
-  // Handle CORS preflight
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle OPTIONS request (preflight)
   if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.status(200).end();
     return;
   }
-  
+
   try {
-    // Extract the target path by removing '/api/proxy'
-    const targetPath = req.url.replace(/^\/api\/proxy\/?/, '/');
-    const targetUrl = `https://quiz-backend-pro.onrender.com${targetPath}`;
-    
-    console.log(`Forwarding to: ${targetUrl}`);
-    
-    // Forward the request to the backend
+    // Get path from request
+    const path = req.query.path || [];
+    const targetPath = '/' + path.join('/');
+    const url = `https://quiz-backend-pro.onrender.com${targetPath}`;
+
+    console.log(`Proxying ${req.method} request to: ${url}`);
+
+    // Create fetch options
     const fetchOptions = {
       method: req.method,
       headers: {
-        'Content-Type': req.headers['content-type'] || 'application/json'
-      }
+        'Content-Type': req.headers['content-type'] || 'application/json',
+      },
     };
-    
-    // Add body for non-GET requests
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      const bodyParser = require('body-parser');
-      await new Promise((resolve, reject) => {
-        bodyParser.raw({ type: '*/*', limit: '10mb' })(req, res, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-      
+
+    // Add body for non-GET methods
+    if (req.method !== 'GET' && req.body) {
       fetchOptions.body = req.body;
     }
+
+    // Forward request to target server
+    const response = await fetch(url, fetchOptions);
     
-    // Make the fetch request
-    const response = await fetch(targetUrl, fetchOptions);
-    const data = await response.text();
+    // Read the response body
+    const contentType = response.headers.get("content-type");
+    let body;
     
-    // Forward the response
-    res.status(response.status);
-    
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    
-    // Forward content type
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
+    if (contentType && contentType.includes("application/json")) {
+      body = await response.json();
+    } else {
+      body = await response.text();
     }
+
+    // Send response back to client
+    res.status(response.status);
+    res.setHeader('Content-Type', contentType || 'text/plain');
     
-    res.send(data);
+    if (typeof body === 'object') {
+      res.json(body);
+    } else {
+      res.send(body);
+    }
+
   } catch (error) {
     console.error('Proxy error:', error);
-    res.status(500).json({ 
-      error: 'Proxy Error', 
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    res.status(500).json({ error: 'Proxy Error', message: error.message });
   }
 }
+
+export const config = {
+  api: {
+    bodyParser: false,
+    externalResolver: true,
+  },
+};
