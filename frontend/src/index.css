@@ -2,6 +2,8 @@
   --primary-blue: #1a237e;
   --accent-orange: #ff6d00;
   --light-gray: #f5f5f5;
+  --success-green: #4caf50;
+  --error-red: #f44336;
 }
 
 body {
@@ -29,7 +31,7 @@ body {
   background: white;
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  padding: 2rem;
+  overflow: hidden;
 }
 
 .question {
@@ -49,6 +51,10 @@ body {
   border-radius: 4px;
 }
 
+.option:hover {
+  background-color: #f9f9f9;
+}
+
 .answer {
   padding: 1.5rem;
   background: #e8f5e9;
@@ -63,12 +69,26 @@ body {
   border-radius: 4px;
 }
 
-.table {
-  background: white;
-  padding: 1rem;
-  border-radius: 4px;
+.table-container {
+  width: 100%;
   overflow-x: auto;
   margin: 1rem 0;
+}
+
+.table-container table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.table-container th,
+.table-container td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
+.table-container th {
+  background-color: #f2f2f2;
 }
 
 .upload-section {
@@ -77,4 +97,69 @@ body {
   background: white;
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Quiz mode specific styles */
+.quiz-container button,
+.config-screen button,
+.results-container button {
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.quiz-container button:hover,
+.config-screen button:hover,
+.results-container button:hover {
+  opacity: 0.9;
+}
+
+/* Range input styling */
+input[type=range] {
+  -webkit-appearance: none;
+  height: 10px;
+  background: #d3d3d3;
+  border-radius: 5px;
+  outline: none;
+}
+
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  background: var(--primary-blue);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+input[type=range]::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  background: var(--primary-blue);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+/* Improved table styling */
+.table-container table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-container th, 
+.table-container td {
+  border: 1px solid #ddd;
+  padding: 8px 12px;
+}
+
+.table-container tr:nth-child(even) {
+  background-color: #f9f9f9;
+}
+
+.table-container th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  text-align: left;
+  background-color: var(--primary-blue);
+  color: white;
 }
