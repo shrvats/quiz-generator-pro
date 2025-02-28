@@ -69,6 +69,11 @@ async def handle_pdf(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Processing failed: {str(e)}")
 
+@app.get("/")
+def read_root():
+    return {"message": "PDF Quiz Generator API is running"}
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
