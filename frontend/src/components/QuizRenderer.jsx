@@ -101,8 +101,14 @@ export default function QuizRenderer() {
       );
       
       console.log("Received quiz data:", data);
-      setAllQuestions(data);
-      setStage('configuring');
+      
+      if (data.length === 0) {
+        setError("No questions were extracted from the PDF. Please check the PDF format.");
+        setStage('error');
+      } else {
+        setAllQuestions(data);
+        setStage('configuring');
+      }
     } catch (err) {
       console.error('Upload failed:', err);
       
@@ -154,12 +160,8 @@ export default function QuizRenderer() {
     
     quiz.forEach((question, index) => {
       const userAnswer = selectedAnswers[index];
-      // Extract just the letter from correct answer (if it's in that format)
-      let correctAnswer = question.correct;
-      const letterMatch = correctAnswer.match(/^([A-D])/);
-      if (letterMatch) {
-        correctAnswer = letterMatch[1];
-      }
+      // Extract just the letter from correct answer
+      const correctAnswer = question.correct;
       
       if (userAnswer && userAnswer === correctAnswer) {
         correctCount++;
@@ -180,31 +182,6 @@ export default function QuizRenderer() {
     return 0;
   };
 
-  const renderQuestionContent = (question) => {
-    return (
-      <>
-        <div dangerouslySetInnerHTML={{ __html: question.question }} />
-        
-        {question.has_math && question.math?.map((formula, i) => (
-          <div key={i} style={{ margin: '10px 0' }}>
-            <MathJax dynamic>{`\\(${formula}\\)`}</MathJax>
-          </div>
-        ))}
-        
-        {question.tables?.map((table, i) => (
-          <div key={i} className="table-container" style={{ 
-            margin: '15px 0', 
-            overflowX: 'auto',
-            border: '1px solid #ddd',
-            borderRadius: '4px'
-          }}>
-            <div dangerouslySetInnerHTML={{ __html: table }} />
-          </div>
-        ))}
-      </>
-    );
-  };
-
   // Render the configuration screen
   const renderConfigScreen = () => {
     return (
@@ -219,7 +196,7 @@ export default function QuizRenderer() {
         
         <div style={{ margin: '20px 0' }}>
           <label htmlFor="numQuestions" style={{ display: 'block', marginBottom: '10px' }}>
-            Number of questions in quiz (1-25):
+            Number of questions in quiz (1-{Math.min(25, allQuestions.length)}):
           </label>
           <input 
             type="range" 
@@ -301,10 +278,26 @@ export default function QuizRenderer() {
                 borderBottom: '2px solid #1a237e'
               }}>
                 <strong>Question {idx + 1}</strong>
+                {question.id && <span style={{ marginLeft: '10px', color: '#666' }}>(Q.{question.id})</span>}
               </div>
               
               <div className="question" style={{ padding: '15px' }}>
-                {renderQuestionContent(question)}
+                {question.question}
+                
+                {/* Render table if present */}
+                {question.has_table && question.table_html && (
+                  <div 
+                    className="table-container" 
+                    dangerouslySetInnerHTML={{ __html: question.table_html }}
+                    style={{ 
+                      margin: '15px 0', 
+                      overflowX: 'auto',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      padding: '10px'
+                    }}
+                  />
+                )}
               </div>
               
               <div className="options" style={{ padding: '15px' }}>
@@ -422,12 +415,7 @@ export default function QuizRenderer() {
         <div className="quiz-grid">
           {quiz.map((question, idx) => {
             const userAnswer = selectedAnswers[idx];
-            let correctAnswer = question.correct;
-            const letterMatch = correctAnswer.match(/^([A-D])/);
-            if (letterMatch) {
-              correctAnswer = letterMatch[1];
-            }
-            
+            const correctAnswer = question.correct;
             const isCorrect = userAnswer === correctAnswer;
             
             return (
@@ -452,7 +440,10 @@ export default function QuizRenderer() {
                   justifyContent: 'space-between',
                   alignItems: 'center'
                 }}>
-                  <strong>Question {idx + 1}</strong>
+                  <div>
+                    <strong>Question {idx + 1}</strong>
+                    {question.id && <span style={{ marginLeft: '10px', color: '#666' }}>(Q.{question.id})</span>}
+                  </div>
                   <span style={{ 
                     padding: '3px 8px', 
                     borderRadius: '4px',
@@ -465,7 +456,22 @@ export default function QuizRenderer() {
                 </div>
                 
                 <div className="question" style={{ padding: '15px' }}>
-                  {renderQuestionContent(question)}
+                  {question.question}
+                  
+                  {/* Render table if present */}
+                  {question.has_table && question.table_html && (
+                    <div 
+                      className="table-container" 
+                      dangerouslySetInnerHTML={{ __html: question.table_html }}
+                      style={{ 
+                        margin: '15px 0', 
+                        overflowX: 'auto',
+                        border: '1px solid #ddd',
+                        borderRadius: '4px',
+                        padding: '10px'
+                      }}
+                    />
+                  )}
                 </div>
                 
                 <div className="options" style={{ padding: '15px' }}>
@@ -532,15 +538,28 @@ export default function QuizRenderer() {
                   borderRadius: '4px'
                 }}>
                   <strong>Correct Answer:</strong> {question.correct || "Not specified"}
+                  
+                  {/* Show explanation if available */}
                   {question.explanation && (
-                    <div className="explanation" style={{
-                      marginTop: '10px',
+                    <div style={{ marginTop: '10px' }}>
+                      <strong>Explanation:</strong> {question.explanation}
+                    </div>
+                  )}
+                  
+                  {/* Show "Things to Remember" section if available */}
+                  {question.things_to_remember && question.things_to_remember.length > 0 && (
+                    <div className="things-to-remember" style={{
+                      marginTop: '15px',
                       padding: '10px',
                       backgroundColor: '#f5f5f5',
                       borderRadius: '4px'
                     }}>
-                      <strong>Things to Remember:</strong> 
-                      <div dangerouslySetInnerHTML={{ __html: question.explanation }} />
+                      <strong>Things to Remember:</strong>
+                      <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
+                        {question.things_to_remember.map((item, i) => (
+                          <li key={i}>{item}</li>
+                        ))}
+                      </ul>
                     </div>
                   )}
                 </div>
@@ -637,8 +656,8 @@ export default function QuizRenderer() {
               <p style={{ fontSize: '0.9em', marginTop: '10px' }}>
                 Suggestions:
                 <ul>
+                  <li>Make sure your PDF follows the expected format</li>
                   <li>Try with a smaller PDF file</li>
-                  <li>Ensure the PDF contains properly formatted questions</li>
                   <li>Check if the backend service is running</li>
                 </ul>
               </p>
