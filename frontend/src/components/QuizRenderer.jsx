@@ -4,7 +4,7 @@ import { MathJax } from 'better-react-mathjax';
 
 // Backend URL - use environment variable or fallback to proxy path
 const BACKEND_URL = import.meta.env.VITE_API_URL || "/api/proxy";
-const MAX_TIMEOUT = 55000; // 55 seconds timeout (just under Vercel's 60s limit)
+const MAX_TIMEOUT = 55000; // 55 seconds
 
 export default function QuizRenderer() {
   // Main states
@@ -31,7 +31,7 @@ export default function QuizRenderer() {
   useEffect(() => {
     fetch(`${BACKEND_URL}/health`)
       .then(res => res.ok ? res.json() : Promise.reject(`Status: ${res.status}`))
-      .then(data => setBackendStatus('Connected ✅'))
+      .then(() => setBackendStatus('Connected ✅'))
       .catch(err => setBackendStatus(`Failed to connect ❌ (${err})`));
   }, []);
 
@@ -44,23 +44,16 @@ export default function QuizRenderer() {
 
   // Validate file size and type
   const validateFile = (file) => {
-    // Recommend limiting files to 5MB for reliable processing within the time limit
     const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-    
     if (!file.type.includes('pdf')) {
-      return {
-        valid: false,
-        message: 'Please upload a PDF file.'
-      };
+      return { valid: false, message: 'Please upload a PDF file.' };
     }
-    
     if (file.size > MAX_FILE_SIZE) {
       return {
         valid: false,
         message: `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload a PDF smaller than 5MB.`
       };
     }
-    
     return { valid: true };
   };
 
@@ -69,7 +62,6 @@ export default function QuizRenderer() {
     const file = e.target.files[0];
     if (!file) return;
     
-    // Validate file
     const validation = validateFile(file);
     if (!validation.valid) {
       setError(validation.message);
@@ -97,10 +89,9 @@ export default function QuizRenderer() {
       if (loading) {
         setTimeoutWarningShown(true);
       }
-    }, 40000); // Show warning after 40 seconds
+    }, 40000); // Show warning after 40s
     
     try {
-      // Create form data
       const formData = new FormData();
       formData.append('file', file);
       
@@ -125,17 +116,15 @@ export default function QuizRenderer() {
         setError("No questions were extracted from the PDF.");
       } else {
         setAllQuestions(data);
-        setNumQuestions(Math.min(10, data.length)); // Default to 10 questions or less if fewer available
+        setNumQuestions(Math.min(10, data.length));
       }
     } catch (err) {
       clearTimeout(timeoutWarning);
       console.error('Upload failed:', err);
-      
-      // Handle different error types
       if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-        setError(`Processing timeout: Your PDF may be too large or complex to process within the time limit. Please try a smaller PDF or one with fewer pages.`);
+        setError(`Processing timeout: Your PDF may be too large or complex. Try a smaller PDF or fewer pages.`);
       } else if (err.response && err.response.status === 504) {
-        setError(`Gateway Timeout: The server took too long to process your PDF. Try a smaller PDF or one with fewer pages.`);
+        setError(`Gateway Timeout: The server took too long. Try a smaller PDF or fewer pages.`);
       } else {
         setError(`Upload failed: ${err.message || 'Unknown error'}`);
       }
@@ -148,10 +137,8 @@ export default function QuizRenderer() {
 
   // Start quiz with selected number of questions
   const startQuiz = () => {
-    // Shuffle and take numQuestions from allQuestions
     const shuffled = [...allQuestions].sort(() => 0.5 - Math.random());
     const selected = shuffled.slice(0, numQuestions);
-    
     setQuizQuestions(selected);
     setQuizMode(true);
     setSelectedAnswers({});
@@ -169,16 +156,12 @@ export default function QuizRenderer() {
   // Submit quiz and calculate score
   const submitQuiz = () => {
     let correctCount = 0;
-    
     quizQuestions.forEach((question, index) => {
       const userAnswer = selectedAnswers[index];
-      const correctAnswer = question.correct;
-      
-      if (userAnswer === correctAnswer) {
+      if (userAnswer && userAnswer !== 'skipped' && userAnswer === question.correct) {
         correctCount++;
       }
     });
-    
     setScore(correctCount);
     setShowResults(true);
   };
@@ -227,227 +210,255 @@ export default function QuizRenderer() {
   );
 
   // Render quiz questions
-  const renderQuizQuestions = () => (
-    <div>
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'center',
-        marginBottom: '20px',
-        padding: '15px',
-        backgroundColor: '#f0f0f0',
-        borderRadius: '8px'
-      }}>
-        <h2 style={{ margin: 0 }}>Quiz ({quizQuestions.length} Questions)</h2>
-        <div>
-          <span style={{ marginRight: '15px' }}>
-            Answered: {Object.keys(selectedAnswers).length} of {quizQuestions.length}
-          </span>
-          <button 
-            onClick={submitQuiz}
-            disabled={Object.keys(selectedAnswers).length < quizQuestions.length}
-            style={{
-              backgroundColor: Object.keys(selectedAnswers).length < quizQuestions.length ? '#ccc' : '#1a237e',
-              color: 'white',
-              padding: '8px 16px',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: Object.keys(selectedAnswers).length < quizQuestions.length ? 'not-allowed' : 'pointer'
-            }}
-          >
-            Submit Quiz
-          </button>
-        </div>
-      </div>
-      
-      <div className="quiz-grid">
-        {quizQuestions.map((question, idx) => (
-          <div key={idx} className="card" style={{ 
-            marginBottom: '30px',
-            background: 'white',
-            borderRadius: '8px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-          }}>
-            <div style={{
-              padding: '10px 15px',
-              backgroundColor: '#f0f0f0',
-              borderTopLeftRadius: '8px',
-              borderTopRightRadius: '8px',
-              borderBottom: '2px solid #1a237e'
-            }}>
-              <strong>Question {idx + 1}</strong>
-              {question.id && <span style={{ marginLeft: '10px', color: '#666' }}>(Q.{question.id})</span>}
-            </div>
-            
-            <div style={{ padding: '15px' }}>
-              {question.question}
-              
-              {/* Render table if present */}
-              {question.has_table && question.table_html && (
-                <div 
-                  dangerouslySetInnerHTML={{ __html: question.table_html }}
-                  style={{ 
-                    margin: '15px 0', 
-                    overflowX: 'auto',
-                    border: '1px solid #ddd',
-                    borderRadius: '4px',
-                    padding: '10px'
-                  }}
-                />
-              )}
-            </div>
-            
-            <div style={{ padding: '15px' }}>
-              {Object.entries(question.options || {}).length > 0 ? (
-                Object.entries(question.options).map(([opt, text]) => (
-                  <div 
-                    key={opt} 
-                    onClick={() => handleAnswerSelect(idx, opt)}
-                    style={{
-                      padding: '10px 15px',
-                      margin: '10px 0',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      backgroundColor: selectedAnswers[idx] === opt ? '#e3f2fd' : 'white',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s ease'
-                    }}
-                  >
-                    <strong>{opt}.</strong> {text}
-                  </div>
-                ))
-              ) : (
-                <p style={{ color: '#757575', fontStyle: 'italic' }}>No options found for this question</p>
-              )}
-            </div>
-            
-            {/* Show answer only in results mode */}
-            {showResults && (
-              <div style={{
-                padding: '15px',
-                margin: '10px 15px',
-                backgroundColor: '#e8f5e9',
-                borderRadius: '4px'
-              }}>
-                <strong>Correct Answer:</strong> {question.correct || "Not specified"}
-                
-                {/* Show explanation if available */}
-                {question.explanation && (
-                  <div style={{ marginTop: '10px' }}>
-                    <strong>Explanation:</strong> {question.explanation}
-                  </div>
-                )}
-                
-                {/* Show "Things to Remember" section if available */}
-                {question.things_to_remember && question.things_to_remember.length > 0 && (
-                  <div style={{
-                    marginTop: '15px',
-                    padding: '10px',
-                    backgroundColor: '#f5f5f5',
-                    borderRadius: '4px'
-                  }}>
-                    <strong>Things to Remember:</strong>
-                    <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
-                      {question.things_to_remember.map((item, i) => (
-                        <li key={i}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-      
-      {/* Submit button at bottom */}
-      {!showResults && (
-        <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
-          <button 
-            onClick={submitQuiz}
-            disabled={Object.keys(selectedAnswers).length < quizQuestions.length}
-            style={{
-              backgroundColor: Object.keys(selectedAnswers).length < quizQuestions.length ? '#ccc' : '#1a237e',
-              color: 'white',
-              padding: '12px 24px',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '16px',
-              cursor: Object.keys(selectedAnswers).length < quizQuestions.length ? 'not-allowed' : 'pointer'
-            }}
-          >
-            Submit Quiz
-          </button>
-          
-          {Object.keys(selectedAnswers).length < quizQuestions.length && (
-            <p style={{ color: '#f44336', marginTop: '10px' }}>
-              Please answer all questions before submitting.
-            </p>
-          )}
-        </div>
-      )}
-      
-      {/* Results summary */}
-      {showResults && (
+  const renderQuizQuestions = () => {
+    // Count how many have answers (not including 'skipped')
+    const answeredCount = Object.keys(selectedAnswers).filter(k => selectedAnswers[k] && selectedAnswers[k] !== 'skipped').length;
+    
+    return (
+      <div>
         <div style={{ 
-          padding: '20px',
-          backgroundColor: '#e8f5e9',
-          borderRadius: '8px',
-          marginBottom: '30px',
-          textAlign: 'center'
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          marginBottom: '20px',
+          padding: '15px',
+          backgroundColor: '#f0f0f0',
+          borderRadius: '8px'
         }}>
-          <h2>Quiz Results</h2>
-          <div style={{ fontSize: '24px', margin: '15px 0' }}>
-            Your Score: <strong>{score}</strong> out of <strong>{quizQuestions.length}</strong>
-            <span style={{ marginLeft: '10px' }}>
-              ({Math.round((score / quizQuestions.length) * 100)}%)
-            </span>
-          </div>
-          
+          <h2 style={{ margin: 0 }}>Quiz ({quizQuestions.length} Questions)</h2>
           <div>
+            <span style={{ marginRight: '15px' }}>
+              Answered: {answeredCount} of {quizQuestions.length}
+            </span>
             <button 
-              onClick={() => {
-                setQuizMode(false);
-                setShowResults(false);
-              }}
+              onClick={submitQuiz}
+              disabled={answeredCount < quizQuestions.length}
               style={{
-                backgroundColor: '#1a237e',
+                backgroundColor: answeredCount < quizQuestions.length ? '#ccc' : '#1a237e',
                 color: 'white',
-                padding: '10px 20px',
+                padding: '8px 16px',
                 border: 'none',
                 borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
+                cursor: answeredCount < quizQuestions.length ? 'not-allowed' : 'pointer'
               }}
             >
-              Create New Quiz
-            </button>
-            
-            <button 
-              onClick={() => {
-                setAllQuestions([]);
-                setQuizMode(false);
-                setShowResults(false);
-              }}
-              style={{
-                backgroundColor: '#f5f5f5',
-                color: '#333',
-                padding: '10px 20px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
-              }}
-            >
-              Upload New PDF
+              Submit Quiz
             </button>
           </div>
         </div>
-      )}
-    </div>
-  );
+        
+        <div className="quiz-grid">
+          {quizQuestions.map((question, idx) => (
+            <div key={idx} className="card">
+              <div style={{
+                padding: '10px 15px',
+                backgroundColor: '#f0f0f0',
+                borderTopLeftRadius: '8px',
+                borderTopRightRadius: '8px',
+                borderBottom: '2px solid #1a237e'
+              }}>
+                <strong>Question {idx + 1}</strong>
+                {question.id && (
+                  <span style={{ marginLeft: '10px', color: '#666' }}>
+                    (Q.{question.id})
+                  </span>
+                )}
+              </div>
+              
+              <div style={{ padding: '15px' }}>
+                {/* If question contains math, wrap in MathJax */}
+                {question.contains_math ? (
+                  <MathJax>{question.question}</MathJax>
+                ) : (
+                  <div>{question.question}</div>
+                )}
 
-  // Main render function
+                {/* Only render table if it actually exists */}
+                {question.has_table && question.table_html && question.table_html.trim() !== '' && (
+                  <div 
+                    dangerouslySetInnerHTML={{ __html: question.table_html }}
+                    style={{ 
+                      margin: '15px 0', 
+                      overflowX: 'auto',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      padding: '10px'
+                    }}
+                  />
+                )}
+              </div>
+              
+              <div className="options" style={{ padding: '15px' }}>
+                {Object.entries(question.options || {}).length > 0 ? (
+                  Object.entries(question.options).map(([opt, text]) => (
+                    <div 
+                      key={opt} 
+                      className={`option ${selectedAnswers[idx] === opt ? 'selected-option' : ''}`}
+                      onClick={() => handleAnswerSelect(idx, opt)}
+                      style={{
+                        cursor: 'pointer',
+                        backgroundColor: selectedAnswers[idx] === opt ? '#e3f2fd' : '#fff'
+                      }}
+                    >
+                      <strong>{opt}.</strong> {" "}
+                      {question.contains_math ? (
+                        <MathJax>{text}</MathJax>
+                      ) : (
+                        <span>{text}</span>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <p style={{ color: '#757575', fontStyle: 'italic' }}>
+                    No options found for this question
+                  </p>
+                )}
+                
+                {/* Skip button for any question */}
+                <button
+                  onClick={() => handleAnswerSelect(idx, 'skipped')}
+                  className="btn skip-btn"
+                  style={{
+                    marginTop: '8px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px',
+                    padding: '10px 15px',
+                    cursor: 'pointer',
+                    backgroundColor: selectedAnswers[idx] === 'skipped' ? '#e3f2fd' : '#fff'
+                  }}
+                >
+                  Skip this question
+                </button>
+              </div>
+              
+              {/* Show answer/explanation only after submission */}
+              {showResults && (
+                <div style={{
+                  padding: '15px',
+                  margin: '10px 15px',
+                  backgroundColor: '#e8f5e9',
+                  borderRadius: '4px'
+                }}>
+                  <strong>Correct Answer:</strong>{" "}
+                  {question.correct || "Not specified"}
+                  
+                  {/* Show explanation if available */}
+                  {question.explanation && (
+                    <div style={{ marginTop: '10px' }}>
+                      <strong>Explanation:</strong> {question.explanation}
+                    </div>
+                  )}
+                  
+                  {/* Show "Things to Remember" if available */}
+                  {question.things_to_remember && question.things_to_remember.length > 0 && (
+                    <div style={{
+                      marginTop: '15px',
+                      padding: '10px',
+                      backgroundColor: '#f5f5f5',
+                      borderRadius: '4px'
+                    }}>
+                      <strong>Things to Remember:</strong>
+                      <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
+                        {question.things_to_remember.map((item, i) => (
+                          <li key={i}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        
+        {/* Bottom Submit button (hidden once results are shown) */}
+        {!showResults && (
+          <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
+            <button 
+              onClick={submitQuiz}
+              disabled={answeredCount < quizQuestions.length}
+              style={{
+                backgroundColor: answeredCount < quizQuestions.length ? '#ccc' : '#1a237e',
+                color: 'white',
+                padding: '12px 24px',
+                border: 'none',
+                borderRadius: '4px',
+                fontSize: '16px',
+                cursor: answeredCount < quizQuestions.length ? 'not-allowed' : 'pointer'
+              }}
+            >
+              Submit Quiz
+            </button>
+            
+            {answeredCount < quizQuestions.length && (
+              <p style={{ color: '#f44336', marginTop: '10px' }}>
+                Please answer or skip all questions before submitting.
+              </p>
+            )}
+          </div>
+        )}
+        
+        {/* Results summary */}
+        {showResults && (
+          <div style={{ 
+            padding: '20px',
+            backgroundColor: '#e8f5e9',
+            borderRadius: '8px',
+            marginBottom: '30px',
+            textAlign: 'center'
+          }}>
+            <h2>Quiz Results</h2>
+            <div style={{ fontSize: '24px', margin: '15px 0' }}>
+              Your Score: <strong>{score}</strong> out of <strong>{quizQuestions.length}</strong>
+              <span style={{ marginLeft: '10px' }}>
+                ({Math.round((score / quizQuestions.length) * 100)}%)
+              </span>
+            </div>
+            
+            <div>
+              <button 
+                onClick={() => {
+                  setQuizMode(false);
+                  setShowResults(false);
+                }}
+                style={{
+                  backgroundColor: '#1a237e',
+                  color: 'white',
+                  padding: '10px 20px',
+                  border: 'none',
+                  borderRadius: '4px',
+                  margin: '10px',
+                  cursor: 'pointer'
+                }}
+              >
+                Create New Quiz
+              </button>
+              
+              <button 
+                onClick={() => {
+                  setAllQuestions([]);
+                  setQuizMode(false);
+                  setShowResults(false);
+                }}
+                style={{
+                  backgroundColor: '#f5f5f5',
+                  color: '#333',
+                  padding: '10px 20px',
+                  border: '1px solid #ddd',
+                  borderRadius: '4px',
+                  margin: '10px',
+                  cursor: 'pointer'
+                }}
+              >
+                Upload New PDF
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="container">
       <div style={{
@@ -457,10 +468,12 @@ export default function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}</small></p>
+        <p><small>
+          Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}
+        </small></p>
       </div>
       
-      {/* Upload Section - Only show if not in quiz mode */}
+      {/* Upload Section - Only show if not in quiz mode and no questions loaded */}
       {!quizMode && !allQuestions.length && (
         <div style={{
           marginBottom: '2rem',
@@ -493,12 +506,12 @@ export default function QuizRenderer() {
           {loading && (
             <div style={{ marginBottom: '20px' }}>
               <p>
-                {uploadProgress < 100 ? 
-                  `Uploading PDF (${uploadProgress}%)...` : 
-                  `Processing PDF... (${processingTime} seconds elapsed)`}
-                  
+                {uploadProgress < 100 
+                  ? `Uploading PDF (${uploadProgress}%)...` 
+                  : `Processing PDF... (${processingTime} seconds elapsed)`
+                }
                 {timeoutWarningShown && (
-                  <span style={{ color: '#f44336', fontWeight: 'bold' }}> 
+                  <span style={{ color: '#f44336', fontWeight: 'bold' }}>
                     {' '}Processing taking longer than expected. This may time out.
                   </span>
                 )}
@@ -517,7 +530,7 @@ export default function QuizRenderer() {
                   backgroundColor: timeoutWarningShown ? '#f44336' : '#1a237e',
                   transition: 'width 0.5s ease',
                   animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
-                }}></div>
+                }} />
               </div>
               <style jsx>{`
                 @keyframes pulse {
