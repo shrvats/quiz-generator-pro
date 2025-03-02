@@ -4,7 +4,7 @@ import { MathJax } from 'better-react-mathjax';
 
 // Backend URL - use environment variable or fallback to proxy path
 const BACKEND_URL = import.meta.env.VITE_API_URL || "/api/proxy";
-const MAX_TIMEOUT = 55000; // 55 seconds
+const MAX_TIMEOUT = 55000; // 55 seconds timeout (just under Vercel's 60s limit)
 
 export default function QuizRenderer() {
   // Main states
@@ -57,7 +57,7 @@ export default function QuizRenderer() {
     return { valid: true };
   };
 
-  // Handle file upload
+  // Handle file upload and processing
   const handleFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -86,10 +86,8 @@ export default function QuizRenderer() {
     
     // Set timeout warning
     const timeoutWarning = setTimeout(() => {
-      if (loading) {
-        setTimeoutWarningShown(true);
-      }
-    }, 40000); // Show warning after 40s
+      if (loading) setTimeoutWarningShown(true);
+    }, 40000); // Show warning after 40 seconds
     
     try {
       const formData = new FormData();
@@ -135,7 +133,7 @@ export default function QuizRenderer() {
     }
   };
 
-  // Start quiz with selected number of questions
+  // Start quiz by shuffling and selecting questions
   const startQuiz = () => {
     const shuffled = [...allQuestions].sort(() => 0.5 - Math.random());
     const selected = shuffled.slice(0, numQuestions);
@@ -145,7 +143,7 @@ export default function QuizRenderer() {
     setShowResults(false);
   };
 
-  // Handle answer selection
+  // Record answer or skip for a given question
   const handleAnswerSelect = (questionIndex, option) => {
     setSelectedAnswers(prev => ({
       ...prev,
@@ -153,7 +151,7 @@ export default function QuizRenderer() {
     }));
   };
 
-  // Submit quiz and calculate score
+  // Submit quiz and calculate score based on recorded answers
   const submitQuiz = () => {
     let correctCount = 0;
     quizQuestions.forEach((question, index) => {
@@ -166,12 +164,11 @@ export default function QuizRenderer() {
     setShowResults(true);
   };
 
-  // Render configuration screen
+  // APPENDED CHANGE: Render configuration screen (unchanged from original with minor style tweaks)
   const renderConfigScreen = () => (
     <div style={{ backgroundColor: '#f5f5f5', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
       <h2>Quiz Configuration</h2>
       <p>Successfully extracted {allQuestions.length} questions from your PDF.</p>
-      
       <div style={{ margin: '20px 0' }}>
         <label htmlFor="numQuestions" style={{ display: 'block', marginBottom: '10px' }}>
           Number of questions in quiz (1-{Math.min(25, allQuestions.length)}):
@@ -191,7 +188,6 @@ export default function QuizRenderer() {
           <span>{Math.min(25, allQuestions.length)}</span>
         </div>
       </div>
-      
       <button 
         onClick={startQuiz}
         style={{
@@ -209,10 +205,9 @@ export default function QuizRenderer() {
     </div>
   );
 
-  // Render quiz questions
+  // APPENDED CHANGE: Render quiz questions with updated clickable options and table checks
   const renderQuizQuestions = () => {
-    // Count how many have answers (not including 'skipped')
-    const answeredCount = Object.keys(selectedAnswers).filter(k => selectedAnswers[k] && selectedAnswers[k] !== 'skipped').length;
+    const answeredCount = Object.keys(selectedAnswers).length;
     
     return (
       <div>
@@ -249,7 +244,7 @@ export default function QuizRenderer() {
         
         <div className="quiz-grid">
           {quizQuestions.map((question, idx) => (
-            <div key={idx} className="card">
+            <div key={idx} className="card" style={{ marginBottom: '30px' }}>
               <div style={{
                 padding: '10px 15px',
                 backgroundColor: '#f0f0f0',
@@ -266,24 +261,20 @@ export default function QuizRenderer() {
               </div>
               
               <div style={{ padding: '15px' }}>
-                {/* If question contains math, wrap in MathJax */}
                 {question.contains_math ? (
                   <MathJax>{question.question}</MathJax>
                 ) : (
                   <div>{question.question}</div>
                 )}
-
-                {/* Only render table if it actually exists */}
-                {question.has_table && question.table_html && question.table_html.trim() !== '' && (
+                
+                {/* APPENDED CHANGE: Only render table if table_html exists, is non-empty, and contains a table tag */}
+                {question.has_table &&
+                 question.table_html &&
+                 question.table_html.trim() !== '' &&
+                 question.table_html.includes('<table') && (
                   <div 
                     dangerouslySetInnerHTML={{ __html: question.table_html }}
-                    style={{ 
-                      margin: '15px 0', 
-                      overflowX: 'auto',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      padding: '10px'
-                    }}
+                    style={{ margin: '15px 0', overflowX: 'auto', border: '1px solid #ddd', borderRadius: '4px', padding: '10px' }}
                   />
                 )}
               </div>
@@ -314,7 +305,7 @@ export default function QuizRenderer() {
                   </p>
                 )}
                 
-                {/* Skip button for any question */}
+                {/* APPENDED CHANGE: Always include a skip button */}
                 <button
                   onClick={() => handleAnswerSelect(idx, 'skipped')}
                   className="btn skip-btn"
@@ -331,7 +322,6 @@ export default function QuizRenderer() {
                 </button>
               </div>
               
-              {/* Show answer/explanation only after submission */}
               {showResults && (
                 <div style={{
                   padding: '15px',
@@ -342,14 +332,12 @@ export default function QuizRenderer() {
                   <strong>Correct Answer:</strong>{" "}
                   {question.correct || "Not specified"}
                   
-                  {/* Show explanation if available */}
                   {question.explanation && (
                     <div style={{ marginTop: '10px' }}>
                       <strong>Explanation:</strong> {question.explanation}
                     </div>
                   )}
                   
-                  {/* Show "Things to Remember" if available */}
                   {question.things_to_remember && question.things_to_remember.length > 0 && (
                     <div style={{
                       marginTop: '15px',
@@ -371,7 +359,6 @@ export default function QuizRenderer() {
           ))}
         </div>
         
-        {/* Bottom Submit button (hidden once results are shown) */}
         {!showResults && (
           <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
             <button 
@@ -389,7 +376,6 @@ export default function QuizRenderer() {
             >
               Submit Quiz
             </button>
-            
             {answeredCount < quizQuestions.length && (
               <p style={{ color: '#f44336', marginTop: '10px' }}>
                 Please answer or skip all questions before submitting.
@@ -398,7 +384,6 @@ export default function QuizRenderer() {
           </div>
         )}
         
-        {/* Results summary */}
         {showResults && (
           <div style={{ 
             padding: '20px',
@@ -414,7 +399,6 @@ export default function QuizRenderer() {
                 ({Math.round((score / quizQuestions.length) * 100)}%)
               </span>
             </div>
-            
             <div>
               <button 
                 onClick={() => {
@@ -433,7 +417,6 @@ export default function QuizRenderer() {
               >
                 Create New Quiz
               </button>
-              
               <button 
                 onClick={() => {
                   setAllQuestions([]);
@@ -468,12 +451,14 @@ export default function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>
-          Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}
-        </small></p>
+        <p>
+          <small>
+            Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}
+          </small>
+        </p>
       </div>
       
-      {/* Upload Section - Only show if not in quiz mode and no questions loaded */}
+      {/* Upload Section */}
       {!quizMode && !allQuestions.length && (
         <div style={{
           marginBottom: '2rem',
@@ -485,7 +470,6 @@ export default function QuizRenderer() {
           <h2>Upload PDF</h2>
           <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 5MB</strong></p>
           <p><small>Larger files may exceed processing time limits.</small></p>
-          
           <input 
             type="file" 
             accept=".pdf" 
@@ -502,13 +486,12 @@ export default function QuizRenderer() {
               cursor: loading ? 'not-allowed' : 'pointer'
             }}
           />
-          
           {loading && (
             <div style={{ marginBottom: '20px' }}>
               <p>
-                {uploadProgress < 100 
-                  ? `Uploading PDF (${uploadProgress}%)...` 
-                  : `Processing PDF... (${processingTime} seconds elapsed)`
+                {uploadProgress < 100 ? 
+                  `Uploading PDF (${uploadProgress}%)...` : 
+                  `Processing PDF... (${processingTime} seconds elapsed)`
                 }
                 {timeoutWarningShown && (
                   <span style={{ color: '#f44336', fontWeight: 'bold' }}>
@@ -541,7 +524,6 @@ export default function QuizRenderer() {
               `}</style>
             </div>
           )}
-          
           {error && (
             <div style={{
               color: 'red',
@@ -556,10 +538,10 @@ export default function QuizRenderer() {
         </div>
       )}
       
-      {/* Configuration Screen - Show after successful upload and not in quiz mode */}
+      {/* Configuration Screen */}
       {!quizMode && allQuestions.length > 0 && renderConfigScreen()}
       
-      {/* Quiz Screen - Show in quiz mode */}
+      {/* Quiz Screen */}
       {quizMode && renderQuizQuestions()}
     </div>
   );
