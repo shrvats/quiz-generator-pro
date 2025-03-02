@@ -31,6 +31,13 @@ function QuizRenderer() {
   const [processingTimer, setProcessingTimer] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [timeoutWarningShown, setTimeoutWarningShown] = useState(false);
+  
+  // Debug state - helps identify issues with submission
+  const [debugInfo, setDebugInfo] = useState({
+    totalQuestions: 0,
+    answeredCount: 0,
+    buttonEnabled: false
+  });
 
   // Check backend health on load
   useEffect(() => {
@@ -46,11 +53,23 @@ function QuizRenderer() {
       if (processingTimer) clearInterval(processingTimer);
     };
   }, [processingTimer]);
+  
+  // Update debug info whenever relevant states change
+  useEffect(() => {
+    if (quizMode) {
+      const buttonEnabled = areAllQuestionsAddressed();
+      setDebugInfo({
+        totalQuestions: quizQuestions.length,
+        answeredCount: Object.keys(selectedAnswers).length,
+        buttonEnabled
+      });
+    }
+  }, [quizQuestions, selectedAnswers]);
 
   // Validate file size and type
   const validateFile = (file) => {
-    // Recommend limiting files to 5MB for reliable processing within the time limit
-    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+    // Smaller max size (3MB) for more reliable processing
+    const MAX_FILE_SIZE = 3 * 1024 * 1024;
     
     if (!file.type.includes('pdf')) {
       return {
@@ -62,7 +81,7 @@ function QuizRenderer() {
     if (file.size > MAX_FILE_SIZE) {
       return {
         valid: false,
-        message: `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload a PDF smaller than 5MB.`
+        message: `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload a PDF smaller than 3MB.`
       };
     }
     
@@ -97,25 +116,25 @@ function QuizRenderer() {
     const timer = setInterval(() => setProcessingTime(prev => prev + 1), 1000);
     setProcessingTimer(timer);
     
-    // Set timeout warning
+    // Set timeout warning earlier (30 seconds)
     const timeoutWarning = setTimeout(() => {
       if (loading) {
         setTimeoutWarningShown(true);
       }
-    }, 40000); // Show warning after 40 seconds
+    }, 30000);
     
     try {
       // Create form data
       const formData = new FormData();
       formData.append('file', file);
       
-      // Upload and process file
+      // Reduced timeout to prevent browser waiting too long
       const { data } = await axios.post(
         `${BACKEND_URL}/process`,
         formData,
         { 
           headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: 55000, // 55 seconds timeout
+          timeout: 40000, // 40 second timeout
           onUploadProgress: (progressEvent) => {
             const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
             setUploadProgress(percentCompleted);
@@ -126,7 +145,7 @@ function QuizRenderer() {
       clearTimeout(timeoutWarning);
       console.log("Received quiz data:", data);
       
-      if (data.length === 0) {
+      if (!data || data.length === 0) {
         setError("No questions were extracted from the PDF.");
       } else {
         setAllQuestions(data);
@@ -138,13 +157,11 @@ function QuizRenderer() {
       
       // Handle different error types
       if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-        setError(`Processing timeout: Your PDF may be too large or complex to process within the time limit. Please try a smaller PDF or one with fewer pages.`);
+        setError(`Processing timeout: Please try a smaller PDF (under 3MB) or one with fewer pages.`);
       } else if (err.response && err.response.status === 504) {
-        setError(`Gateway Timeout: The server took too long to process your PDF. Try a smaller PDF or one with fewer pages.`);
-      } else if (err.response && err.response.status === 500) {
-        setError(`Server Error: The backend server encountered an issue. Please try again later or contact support.`);
+        setError(`Gateway Timeout: The server took too long to process your PDF. Try a smaller PDF.`);
       } else {
-        setError(`Upload failed: ${err.message || 'Unknown error'}. Please check your network connection and try again.`);
+        setError(`Upload failed: ${err.message || 'Unknown error'}. Try a smaller PDF or check your connection.`);
       }
     } finally {
       setLoading(false);
@@ -163,38 +180,56 @@ function QuizRenderer() {
     setQuizMode(true);
     setSelectedAnswers({});
     setShowResults(false);
+    
+    // Pre-mark questions without options as skipped
+    const initialAnswers = {};
+    selected.forEach((question, index) => {
+      if (!question.options || Object.keys(question.options || {}).length === 0) {
+        initialAnswers[index] = 'skipped';
+      }
+    });
+    
+    // Set initial answers if any questions were auto-skipped
+    if (Object.keys(initialAnswers).length > 0) {
+      setSelectedAnswers(initialAnswers);
+    }
   };
 
   // Handle answer selection
   const handleAnswerSelect = (questionIndex, option) => {
+    console.log(`Selected ${option} for question ${questionIndex}`);
     setSelectedAnswers(prev => ({
       ...prev,
       [questionIndex]: option
     }));
   };
 
-  // Check if all answerable questions have been answered
-  const areAllAnswerableQuestionsAnswered = () => {
-    let allAnswered = true;
+  // Check if all questions have been answered or explicitly skipped
+  const areAllQuestionsAddressed = () => {
+    // If there are no questions, return false
+    if (!quizQuestions || quizQuestions.length === 0) return false;
     
-    quizQuestions.forEach((question, index) => {
-      // Handle questions with or without options
-      if (!selectedAnswers[index]) {
-        allAnswered = false;
+    // For each question, check if there's an answer or it's marked as skipped
+    for (let i = 0; i < quizQuestions.length; i++) {
+      if (selectedAnswers[i] === undefined) {
+        return false;
       }
-    });
+    }
     
-    return allAnswered;
+    return true;
   };
 
   // Submit quiz and calculate score
   const submitQuiz = () => {
+    console.log("Submitting quiz with answers:", selectedAnswers);
+    
     let correctCount = 0;
     let totalAnswerable = 0;
+    let skippedCount = 0;
     
     quizQuestions.forEach((question, index) => {
       // Check if question has options
-      const hasOptions = question.options && Object.keys(question.options).length > 0;
+      const hasOptions = question.options && Object.keys(question.options || {}).length > 0;
       
       if (hasOptions) {
         totalAnswerable++;
@@ -204,17 +239,30 @@ function QuizRenderer() {
         if (userAnswer === correctAnswer && userAnswer !== 'skipped') {
           correctCount++;
         }
+      } else {
+        skippedCount++;
       }
     });
     
+    console.log(`Quiz stats: ${correctCount} correct out of ${totalAnswerable} answerable questions. ${skippedCount} questions skipped.`);
+    
     // Calculate score based on answerable questions
     setScore(correctCount);
+    
     // Store additional stats
     setQuizStats({
       totalQuestions: quizQuestions.length,
       answerableQuestions: totalAnswerable || 1, // Avoid division by zero
-      skippedQuestions: quizQuestions.length - totalAnswerable
+      skippedQuestions: skippedCount
     });
+    
+    // Show results
+    setShowResults(true);
+  };
+
+  // Force submit function - use only for debugging
+  const forceSubmit = () => {
+    console.log("Force submitting quiz");
     setShowResults(true);
   };
 
@@ -268,31 +316,44 @@ function QuizRenderer() {
         display: 'flex', 
         justifyContent: 'space-between', 
         alignItems: 'center',
+        flexWrap: 'wrap',
         marginBottom: '20px',
         padding: '15px',
         backgroundColor: '#f0f0f0',
         borderRadius: '8px'
       }}>
-        <h2 style={{ margin: 0 }}>Quiz ({quizQuestions.length} Questions)</h2>
+        <h2 style={{ margin: '0 0 10px 0' }}>Quiz ({quizQuestions.length} Questions)</h2>
         <div>
           <span style={{ marginRight: '15px' }}>
             Answered: {Object.keys(selectedAnswers).length} of {quizQuestions.length}
           </span>
           <button 
             onClick={submitQuiz}
-            disabled={!areAllAnswerableQuestionsAnswered()}
+            disabled={!areAllQuestionsAddressed()}
             style={{
-              backgroundColor: !areAllAnswerableQuestionsAnswered() ? '#ccc' : '#1a237e',
+              backgroundColor: !areAllQuestionsAddressed() ? '#ccc' : '#1a237e',
               color: 'white',
               padding: '8px 16px',
               border: 'none',
               borderRadius: '4px',
-              cursor: !areAllAnswerableQuestionsAnswered() ? 'not-allowed' : 'pointer'
+              cursor: !areAllQuestionsAddressed() ? 'not-allowed' : 'pointer'
             }}
           >
             Submit Quiz
           </button>
         </div>
+      </div>
+      
+      {/* Debug information */}
+      <div style={{ 
+        padding: '10px', 
+        backgroundColor: '#fff8e1', 
+        borderRadius: '4px', 
+        marginBottom: '15px',
+        fontSize: '14px' 
+      }}>
+        <p><strong>Tips:</strong> If questions have no options, click "Skip this question" to mark them as skipped.</p>
+        <p>Questions without options are automatically marked as skipped.</p>
       </div>
       
       <div className="quiz-grid">
@@ -312,6 +373,9 @@ function QuizRenderer() {
             }}>
               <strong>Question {idx + 1}</strong>
               {question.id && <span style={{ marginLeft: '10px', color: '#666' }}>(Q.{question.id})</span>}
+              {selectedAnswers[idx] === 'skipped' && 
+                <span style={{ marginLeft: '10px', color: '#f44336' }}>(Skipped)</span>
+              }
             </div>
             
             <div style={{ padding: '15px' }}>
@@ -333,7 +397,7 @@ function QuizRenderer() {
             </div>
             
             <div style={{ padding: '15px' }}>
-              {question.options && Object.entries(question.options).length > 0 ? (
+              {question.options && Object.keys(question.options).length > 0 ? (
                 Object.entries(question.options).map(([opt, text]) => (
                   <div 
                     key={opt} 
@@ -419,24 +483,43 @@ function QuizRenderer() {
         <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
           <button 
             onClick={submitQuiz}
-            disabled={!areAllAnswerableQuestionsAnswered()}
+            disabled={!areAllQuestionsAddressed()}
             style={{
-              backgroundColor: !areAllAnswerableQuestionsAnswered() ? '#ccc' : '#1a237e',
+              backgroundColor: !areAllQuestionsAddressed() ? '#ccc' : '#1a237e',
               color: 'white',
               padding: '12px 24px',
               border: 'none',
               borderRadius: '4px',
               fontSize: '16px',
-              cursor: !areAllAnswerableQuestionsAnswered() ? 'not-allowed' : 'pointer'
+              cursor: !areAllQuestionsAddressed() ? 'not-allowed' : 'pointer'
             }}
           >
             Submit Quiz
           </button>
           
-          {!areAllAnswerableQuestionsAnswered() && (
+          {!areAllQuestionsAddressed() && (
             <p style={{ color: '#f44336', marginTop: '10px' }}>
               Please answer all questions or skip those without options.
             </p>
+          )}
+          
+          {/* Emergency force submit button - for testing only */}
+          {!areAllQuestionsAddressed() && Object.keys(selectedAnswers).length > 0 && (
+            <button 
+              onClick={forceSubmit}
+              style={{
+                marginTop: '20px',
+                padding: '5px 10px',
+                backgroundColor: '#ffebee',
+                color: '#d32f2f',
+                border: '1px solid #d32f2f',
+                borderRadius: '4px',
+                fontSize: '12px',
+                cursor: 'pointer'
+              }}
+            >
+              Force Show Results (Emergency Only)
+            </button>
           )}
         </div>
       )}
@@ -454,7 +537,7 @@ function QuizRenderer() {
           <div style={{ fontSize: '24px', margin: '15px 0' }}>
             Your Score: <strong>{score}</strong> out of <strong>{quizStats.answerableQuestions}</strong>
             <span style={{ marginLeft: '10px' }}>
-              ({Math.round((score / quizStats.answerableQuestions) * 100)}%)
+              ({quizStats.answerableQuestions > 0 ? Math.round((score / quizStats.answerableQuestions) * 100) : 0}%)
             </span>
           </div>
           
@@ -530,8 +613,14 @@ function QuizRenderer() {
           boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
         }}>
           <h2>Upload PDF</h2>
-          <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 5MB</strong></p>
-          <p><small>Larger files may exceed processing time limits.</small></p>
+          <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 3MB</strong></p>
+          <p><small>Tips for best results:
+            <ul style={{ marginTop: '5px', fontSize: '14px', color: '#666' }}>
+              <li>Use smaller PDFs (under 3MB)</li>
+              <li>Use PDFs with clear question formatting</li>
+              <li>Questions should be formatted as "Q.1", "Q.2", etc.</li>
+            </ul>
+          </small></p>
           
           <input 
             type="file" 
