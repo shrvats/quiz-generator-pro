@@ -1,5 +1,5 @@
 import React from 'react';
-import QuizRenderer from './QuizRenderer';
+import QuizRenderer from './QuizRenderer.jsx'; // Added .jsx extension
 import { MathJaxContext } from 'better-react-mathjax';
 
 function App() {
