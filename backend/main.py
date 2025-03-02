@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form
+from fastapi import FastAPI, UploadFile, HTTPException, Request, File
 from fastapi.middleware.cors import CORSMiddleware
 import fitz  # PyMuPDF
 import re
@@ -64,22 +64,11 @@ def detect_question_numbering_format(page_text: str) -> str:
     
     return 'unknown'
 
-def extract_blocks_with_positions(doc, page_range=None) -> List[Dict]:
+def extract_blocks_with_positions(doc) -> List[Dict]:
     """Extract text blocks with their positions and page information"""
     all_blocks = []
     
-    # If page_range is provided, use it to limit extraction
-    if page_range:
-        start_page, end_page = page_range
-        # Adjust page range to be within document bounds
-        start_page = max(0, start_page)
-        end_page = min(len(doc) - 1, end_page)
-        page_iterator = range(start_page, end_page + 1)
-    else:
-        page_iterator = range(len(doc))
-    
-    for page_num in page_iterator:
-        page = doc[page_num]
+    for page_num, page in enumerate(doc):
         # Get blocks with positions
         blocks = page.get_text("dict")["blocks"]
         
@@ -451,7 +440,7 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
     
     return processed_questions
 
-def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict:
+def process_pdf(file_path: str) -> Dict:
     """Advanced PDF processing with layout analysis for mathematical and financial content"""
     start_time = time.time()
     
@@ -459,66 +448,53 @@ def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) ->
         # Open the PDF with PyMuPDF
         doc = fitz.open(file_path)
         
-        # Get total page count
-        total_pages = len(doc)
-        
-        # If page range is not specified, process the entire document
-        if page_range is None:
-            page_range = (0, total_pages - 1)
-        
         # Strategy: Use layout analysis instead of just text patterns
         # 1. Extract blocks with position information
         # 2. Categorize blocks (questions, options, explanations)
         # 3. Group blocks into complete questions
         # 4. Extract tables and mathematical content
         
-        # Extract blocks with positions for the specified page range
-        blocks = extract_blocks_with_positions(doc, page_range)
+        # Extract blocks with positions
+        blocks = extract_blocks_with_positions(doc)
         
         if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during block extraction", "questions": [], "total_pages": total_pages}
+            return {"error": "Processing time limit exceeded during block extraction", "questions": []}
         
         # Categorize blocks by purpose
         categorized = categorize_blocks(blocks)
         
         if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during block categorization", "questions": [], "total_pages": total_pages}
+            return {"error": "Processing time limit exceeded during block categorization", "questions": []}
             
         # Identify individual questions
         identified_questions = identify_questions_from_blocks(blocks)
         
         if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during question identification", "questions": [], "total_pages": total_pages}
+            return {"error": "Processing time limit exceeded during question identification", "questions": []}
         
         # Process each question to extract components
         processed_questions = process_questions_and_options(identified_questions, doc)
         
         if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during question processing", "questions": processed_questions, "total_pages": total_pages}
+            return {"error": "Processing time limit exceeded during question processing", "questions": processed_questions}
         
         # Sort questions by ID
         processed_questions.sort(key=lambda q: q["id"])
         
-        # Return the processed questions along with page information
+        # Return the processed questions
         return {
             "questions": processed_questions,
             "total_questions": len(processed_questions),
-            "total_pages": total_pages,
-            "page_range": page_range,
             "processing_time": time.time() - start_time
         }
     
     except Exception as e:
         print(f"Error in PDF processing: {str(e)}")
         traceback.print_exc()
-        return {"error": f"Failed to process PDF: {str(e)}", "questions": [], "total_pages": 0}
+        return {"error": f"Failed to process PDF: {str(e)}", "questions": []}
 
 @app.post("/process")
-async def handle_pdf(
-    file: UploadFile = File(...),
-    start_page: Optional[int] = Form(None),
-    end_page: Optional[int] = Form(None)
-):
+async def handle_pdf(file: UploadFile = File(...)):
     try:
         print(f"Received file: {file.filename}")
         start_time = time.time()
@@ -530,17 +506,11 @@ async def handle_pdf(
             tmp_path = tmp.name
         
         print(f"Processing file at: {tmp_path}")
-        print(f"Page range requested: {start_page} to {end_page}")
-        
-        # Determine page range
-        page_range = None
-        if start_page is not None and end_page is not None:
-            page_range = (int(start_page), int(end_page))
         
         # Process the PDF with timeout protection
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(process_pdf, tmp_path, page_range),
+                asyncio.to_thread(process_pdf, tmp_path),
                 timeout=55.0  # Allow 55 seconds max (within Vercel's 60s limit)
             )
         except asyncio.TimeoutError:
@@ -548,7 +518,7 @@ async def handle_pdf(
             os.unlink(tmp_path)
             raise HTTPException(
                 status_code=408, 
-                detail="PDF processing timed out. Please try a smaller PDF file or fewer pages."
+                detail="PDF processing timed out. Please try a smaller PDF file."
             )
         
         # Clean up
@@ -564,47 +534,6 @@ async def handle_pdf(
         print(f"Error processing PDF: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
-@app.get("/pdf-info")
-async def get_pdf_info(file: UploadFile = File(...)):
-    """Get basic PDF information without processing content"""
-    try:
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-        
-        # Open PDF to get page count
-        doc = fitz.open(tmp_path)
-        total_pages = len(doc)
-        
-        # Get file size in MB
-        file_size = os.path.getsize(tmp_path) / (1024 * 1024)
-        
-        # Extract metadata
-        metadata = {
-            "title": doc.metadata.get("title", ""),
-            "author": doc.metadata.get("author", ""),
-            "subject": doc.metadata.get("subject", ""),
-            "creator": doc.metadata.get("creator", ""),
-            "producer": doc.metadata.get("producer", "")
-        }
-        
-        # Clean up
-        doc.close()
-        os.unlink(tmp_path)
-        
-        return {
-            "total_pages": total_pages,
-            "file_size_mb": round(file_size, 2),
-            "metadata": metadata
-        }
-    
-    except Exception as e:
-        print(f"Error getting PDF info: {str(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to get PDF info: {str(e)}")
 
 @app.get("/health")
 def health_check():
