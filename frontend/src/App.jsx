@@ -17,15 +17,14 @@ function QuizRenderer() {
   const [quizMode, setQuizMode] = useState(false);
   const [quizQuestions, setQuizQuestions] = useState([]);
   const [numQuestions, setNumQuestions] = useState(10);
-  // Add in Quiz mode states (Line 20)
+  const [selectedAnswers, setSelectedAnswers] = useState({});
+  const [showResults, setShowResults] = useState(false);
+  const [score, setScore] = useState(0);
   const [quizStats, setQuizStats] = useState({
     totalQuestions: 0,
     answerableQuestions: 0,
     skippedQuestions: 0
   });
-  const [selectedAnswers, setSelectedAnswers] = useState({});
-  const [showResults, setShowResults] = useState(false);
-  const [score, setScore] = useState(0);
   
   // Processing states
   const [processingTime, setProcessingTime] = useState(0);
@@ -142,8 +141,10 @@ function QuizRenderer() {
         setError(`Processing timeout: Your PDF may be too large or complex to process within the time limit. Please try a smaller PDF or one with fewer pages.`);
       } else if (err.response && err.response.status === 504) {
         setError(`Gateway Timeout: The server took too long to process your PDF. Try a smaller PDF or one with fewer pages.`);
+      } else if (err.response && err.response.status === 500) {
+        setError(`Server Error: The backend server encountered an issue. Please try again later or contact support.`);
       } else {
-        setError(`Upload failed: ${err.message || 'Unknown error'}`);
+        setError(`Upload failed: ${err.message || 'Unknown error'}. Please check your network connection and try again.`);
       }
     } finally {
       setLoading(false);
@@ -172,52 +173,51 @@ function QuizRenderer() {
     }));
   };
 
- // Replace submitQuiz function (Lines 168-180)
-const submitQuiz = () => {
-  let correctCount = 0;
-  let totalAnswerable = 0;
-  
-  quizQuestions.forEach((question, index) => {
-    if (!question.options || Object.keys(question.options).length === 0) {
-      return;
-    }
+  // Check if all answerable questions have been answered
+  const areAllAnswerableQuestionsAnswered = () => {
+    let allAnswered = true;
     
-    totalAnswerable++;
-    const userAnswer = selectedAnswers[index];
-    const correctAnswer = question.correct;
+    quizQuestions.forEach((question, index) => {
+      // Handle questions with or without options
+      if (!selectedAnswers[index]) {
+        allAnswered = false;
+      }
+    });
     
-    if (userAnswer === correctAnswer && userAnswer !== 'skipped') {
-      correctCount++;
-    }
-  });
-  
-  setScore(correctCount);
-  setQuizStats({
-    totalQuestions: quizQuestions.length,
-    answerableQuestions: totalAnswerable,
-    skippedQuestions: quizQuestions.length - totalAnswerable
-  });
-  setShowResults(true);
-};
+    return allAnswered;
+  };
 
-// Add after submitQuiz (Line 181)
-const areAllAnswerableQuestionsAnswered = () => {
-  let allAnswered = true;
-  
-  quizQuestions.forEach((question, index) => {
-    if (question.options && Object.keys(question.options).length > 0) {
-      if (!selectedAnswers[index]) {
-        allAnswered = false;
+  // Submit quiz and calculate score
+  const submitQuiz = () => {
+    let correctCount = 0;
+    let totalAnswerable = 0;
+    
+    quizQuestions.forEach((question, index) => {
+      // Check if question has options
+      const hasOptions = question.options && Object.keys(question.options).length > 0;
+      
+      if (hasOptions) {
+        totalAnswerable++;
+        const userAnswer = selectedAnswers[index];
+        const correctAnswer = question.correct;
+        
+        if (userAnswer === correctAnswer && userAnswer !== 'skipped') {
+          correctCount++;
+        }
       }
-    } else {
-      if (!selectedAnswers[index]) {
-        allAnswered = false;
-      }
-    }
-  });
-  
-  return allAnswered;
-};
+    });
+    
+    // Calculate score based on answerable questions
+    setScore(correctCount);
+    // Store additional stats
+    setQuizStats({
+      totalQuestions: quizQuestions.length,
+      answerableQuestions: totalAnswerable || 1, // Avoid division by zero
+      skippedQuestions: quizQuestions.length - totalAnswerable
+    });
+    setShowResults(true);
+  };
+
   // Render configuration screen
   const renderConfigScreen = () => (
     <div style={{ backgroundColor: '#f5f5f5', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
@@ -280,14 +280,14 @@ const areAllAnswerableQuestionsAnswered = () => {
           </span>
           <button 
             onClick={submitQuiz}
-            disabled={Object.keys(selectedAnswers).length < quizQuestions.length}
+            disabled={!areAllAnswerableQuestionsAnswered()}
             style={{
-              backgroundColor: Object.keys(selectedAnswers).length < quizQuestions.length ? '#ccc' : '#1a237e',
+              backgroundColor: !areAllAnswerableQuestionsAnswered() ? '#ccc' : '#1a237e',
               color: 'white',
               padding: '8px 16px',
               border: 'none',
               borderRadius: '4px',
-              cursor: Object.keys(selectedAnswers).length < quizQuestions.length ? 'not-allowed' : 'pointer'
+              cursor: !areAllAnswerableQuestionsAnswered() ? 'not-allowed' : 'pointer'
             }}
           >
             Submit Quiz
@@ -333,7 +333,7 @@ const areAllAnswerableQuestionsAnswered = () => {
             </div>
             
             <div style={{ padding: '15px' }}>
-              {Object.entries(question.options || {}).length > 0 ? (
+              {question.options && Object.entries(question.options).length > 0 ? (
                 Object.entries(question.options).map(([opt, text]) => (
                   <div 
                     key={opt} 
@@ -352,7 +352,22 @@ const areAllAnswerableQuestionsAnswered = () => {
                   </div>
                 ))
               ) : (
-                <p style={{ color: '#757575', fontStyle: 'italic' }}>No options found for this question</p>
+                <div>
+                  <p style={{ color: '#757575', fontStyle: 'italic' }}>No options found for this question</p>
+                  <button
+                    onClick={() => handleAnswerSelect(idx, 'skipped')}
+                    style={{
+                      padding: '10px 15px',
+                      margin: '10px 0',
+                      backgroundColor: selectedAnswers[idx] === 'skipped' ? '#ffebee' : '#f5f5f5',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Skip this question
+                  </button>
+                </div>
               )}
             </div>
             
@@ -364,7 +379,11 @@ const areAllAnswerableQuestionsAnswered = () => {
                 backgroundColor: '#e8f5e9',
                 borderRadius: '4px'
               }}>
-                <strong>Correct Answer:</strong> {question.correct || "Not specified"}
+                <strong>Correct Answer:</strong> {
+                  selectedAnswers[idx] === 'skipped' ? 
+                  'Question skipped due to missing options' : 
+                  (question.correct || "Not specified")
+                }
                 
                 {/* Show explanation if available */}
                 {question.explanation && (
@@ -400,23 +419,23 @@ const areAllAnswerableQuestionsAnswered = () => {
         <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
           <button 
             onClick={submitQuiz}
-            disabled={Object.keys(selectedAnswers).length < quizQuestions.length}
+            disabled={!areAllAnswerableQuestionsAnswered()}
             style={{
-              backgroundColor: Object.keys(selectedAnswers).length < quizQuestions.length ? '#ccc' : '#1a237e',
+              backgroundColor: !areAllAnswerableQuestionsAnswered() ? '#ccc' : '#1a237e',
               color: 'white',
               padding: '12px 24px',
               border: 'none',
               borderRadius: '4px',
               fontSize: '16px',
-              cursor: Object.keys(selectedAnswers).length < quizQuestions.length ? 'not-allowed' : 'pointer'
+              cursor: !areAllAnswerableQuestionsAnswered() ? 'not-allowed' : 'pointer'
             }}
           >
             Submit Quiz
           </button>
           
-          {Object.keys(selectedAnswers).length < quizQuestions.length && (
+          {!areAllAnswerableQuestionsAnswered() && (
             <p style={{ color: '#f44336', marginTop: '10px' }}>
-              Please answer all questions before submitting.
+              Please answer all questions or skip those without options.
             </p>
           )}
         </div>
@@ -433,11 +452,17 @@ const areAllAnswerableQuestionsAnswered = () => {
         }}>
           <h2>Quiz Results</h2>
           <div style={{ fontSize: '24px', margin: '15px 0' }}>
-            Your Score: <strong>{score}</strong> out of <strong>{quizQuestions.length}</strong>
+            Your Score: <strong>{score}</strong> out of <strong>{quizStats.answerableQuestions}</strong>
             <span style={{ marginLeft: '10px' }}>
-              ({Math.round((score / quizQuestions.length) * 100)}%)
+              ({Math.round((score / quizStats.answerableQuestions) * 100)}%)
             </span>
           </div>
+          
+          {quizStats.skippedQuestions > 0 && (
+            <div style={{ fontSize: '16px', margin: '10px 0', color: '#757575' }}>
+              {quizStats.skippedQuestions} question(s) were skipped due to missing options
+            </div>
+          )}
           
           <div>
             <button 
