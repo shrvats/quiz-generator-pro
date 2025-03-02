@@ -44,7 +44,7 @@ body {
   margin: 1.5rem 0;
 }
 
-/* APPENDED CHANGE: Ensure options are clickable */
+/* APPENDED CHANGE: Ensure options are clickable and record response in a different color */
 .option {
   padding: 1rem;
   margin: 0.5rem 0;
@@ -55,6 +55,12 @@ body {
 
 .option:hover {
   background-color: #f9f9f9;
+}
+
+/* New rule: selected options will show with success-green background and white text */
+.selected-option {
+  background-color: var(--success-green) !important;
+  color: white;
 }
 
 .answer {
