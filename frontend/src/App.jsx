@@ -162,25 +162,6 @@ function QuizRenderer() {
     }));
   };
 
-  // Check if all answerable questions are answered
-  const areAllAnswerableQuestionsAnswered = () => {
-    let allAnswered = true;
-    
-    quizQuestions.forEach((question, index) => {
-      if (question.options && Object.keys(question.options).length > 0) {
-        if (!selectedAnswers[index]) {
-          allAnswered = false;
-        }
-      } else {
-        if (!selectedAnswers[index]) {
-          allAnswered = false;
-        }
-      }
-    });
-    
-    return allAnswered;
-  };
-
   // Submit quiz and calculate score
   const submitQuiz = () => {
     let correctCount = 0;
@@ -207,6 +188,25 @@ function QuizRenderer() {
       skippedQuestions: quizQuestions.length - totalAnswerable
     });
     setShowResults(true);
+  };
+
+  // Check if all answerable questions are answered
+  const areAllAnswerableQuestionsAnswered = () => {
+    let allAnswered = true;
+    
+    quizQuestions.forEach((question, index) => {
+      if (question.options && Object.keys(question.options).length > 0) {
+        if (!selectedAnswers[index]) {
+          allAnswered = false;
+        }
+      } else {
+        if (!selectedAnswers[index]) {
+          allAnswered = false;
+        }
+      }
+    });
+    
+    return allAnswered;
   };
 
   // Render configuration screen
@@ -409,5 +409,6 @@ function QuizRenderer() {
               border: 'none',
               borderRadius: '4px',
               fontSize: '16px',
-              cursor: !areAllAnswerableQuestionsAnswered()
+              cursor: !areAllAnswerableQuestionsAnswered() ? 'not
+
 
