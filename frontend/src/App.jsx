@@ -31,6 +31,14 @@ function QuizRenderer() {
   const [availableSections, setAvailableSections] = useState([]);
   const [selectedSection, setSelectedSection] = useState(null);
   
+  // PDF information states
+  const [pdfInfo, setPdfInfo] = useState(null);
+  const [pageRangeEnabled, setPageRangeEnabled] = useState(false);
+  const [startPage, setStartPage] = useState(0);
+  const [endPage, setEndPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [selectedFile, setSelectedFile] = useState(null);
+  
   // Processing states
   const [processingTime, setProcessingTime] = useState(0);
   const [processingTimer, setProcessingTimer] = useState(null);
@@ -74,6 +82,35 @@ function QuizRenderer() {
     return { valid: true };
   };
 
+  // Get PDF info to determine page count
+  const getPdfInfo = async (file) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const { data } = await axios.post(
+        `${BACKEND_URL}/pdf-info`,
+        formData,
+        { 
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 15000 // 15 seconds should be enough for metadata
+        }
+      );
+      
+      console.log("Received PDF info:", data);
+      setPdfInfo(data);
+      setTotalPages(data.total_pages);
+      setEndPage(data.total_pages - 1);
+      setSelectedFile(file);
+      
+      return data;
+    } catch (err) {
+      console.error('Failed to get PDF info:', err);
+      setError(`Failed to analyze PDF: ${err.message || 'Unknown error'}`);
+      return null;
+    }
+  };
+
   // Handle file upload
   const handleFile = async (e) => {
     const file = e.target.files[0];
@@ -87,10 +124,7 @@ function QuizRenderer() {
     }
     
     // Reset states
-    setLoading(true);
     setError(null);
-    setProcessingTime(0);
-    setUploadProgress(0);
     setAllQuestions([]);
     setQuizMode(false);
     setQuizQuestions([]);
@@ -99,6 +133,23 @@ function QuizRenderer() {
     setTimeoutWarningShown(false);
     setAvailableSections([]);
     setSelectedSection(null);
+    
+    // Get PDF info first
+    await getPdfInfo(file);
+  };
+
+  // Process PDF with optional page range
+  const processPdf = async () => {
+    if (!selectedFile) {
+      setError("No file selected");
+      return;
+    }
+    
+    // Reset processing states
+    setLoading(true);
+    setError(null);
+    setProcessingTime(0);
+    setUploadProgress(0);
     
     // Start timer
     const timer = setInterval(() => setProcessingTime(prev => prev + 1), 1000);
@@ -114,7 +165,13 @@ function QuizRenderer() {
     try {
       // Create form data
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', selectedFile);
+      
+      // Add page range parameters if enabled
+      if (pageRangeEnabled) {
+        formData.append('start_page', startPage);
+        formData.append('end_page', endPage);
+      }
       
       // Reduced timeout to prevent browser waiting too long
       const { data } = await axios.post(
@@ -266,6 +323,148 @@ function QuizRenderer() {
     // Show results
     setShowResults(true);
   };
+
+  // Render PDF info and page range selection panel
+  const renderPdfInfoPanel = () => (
+    <div style={{ 
+      marginBottom: '2rem',
+      padding: '1.5rem',
+      background: 'white',
+      borderRadius: '8px',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+    }}>
+      <h2>PDF Information</h2>
+      
+      {pdfInfo && (
+        <div>
+          <p><strong>File:</strong> {selectedFile?.name}</p>
+          <p><strong>Pages:</strong> {pdfInfo.total_pages}</p>
+          <p><strong>Size:</strong> {pdfInfo.file_size_mb} MB</p>
+          
+          <div style={{ margin: '20px 0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', marginBottom: '10px' }}>
+              <input 
+                type="checkbox" 
+                checked={pageRangeEnabled}
+                onChange={(e) => setPageRangeEnabled(e.target.checked)}
+                style={{ marginRight: '10px' }}
+              />
+              Process specific page range (useful for large PDFs)
+            </label>
+            
+            {pageRangeEnabled && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+                <div>
+                  <label htmlFor="startPage" style={{ display: 'block', marginBottom: '5px' }}>Start Page:</label>
+                  <input 
+                    type="number" 
+                    id="startPage"
+                    min="0"
+                    max={totalPages - 1}
+                    value={startPage}
+                    onChange={(e) => setStartPage(parseInt(e.target.value))}
+                    style={{ width: '80px', padding: '8px' }}
+                  />
+                </div>
+                
+                <div>
+                  <label htmlFor="endPage" style={{ display: 'block', marginBottom: '5px' }}>End Page:</label>
+                  <input 
+                    type="number" 
+                    id="endPage"
+                    min={startPage}
+                    max={totalPages - 1}
+                    value={endPage}
+                    onChange={(e) => setEndPage(parseInt(e.target.value))}
+                    style={{ width: '80px', padding: '8px' }}
+                  />
+                </div>
+                
+                <div style={{ marginTop: '24px', color: '#666' }}>
+                  (Processing {pageRangeEnabled ? (endPage - startPage + 1) : totalPages} pages)
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <button 
+            onClick={processPdf}
+            disabled={loading}
+            style={{
+              backgroundColor: loading ? '#ccc' : '#1a237e',
+              color: 'white',
+              padding: '12px 24px',
+              border: 'none',
+              borderRadius: '4px',
+              fontSize: '16px',
+              cursor: loading ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {loading ? 'Processing...' : 'Process PDF'}
+          </button>
+          
+          <button 
+            onClick={() => {
+              setSelectedFile(null);
+              setPdfInfo(null);
+            }}
+            disabled={loading}
+            style={{
+              backgroundColor: '#f5f5f5',
+              color: '#333',
+              padding: '12px 24px',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              fontSize: '16px',
+              marginLeft: '10px',
+              cursor: loading ? 'not-allowed' : 'pointer'
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      
+      {loading && (
+        <div style={{ marginTop: '20px' }}>
+          <p>
+            {uploadProgress < 100 ? 
+              `Uploading PDF (${uploadProgress}%)...` : 
+              `Processing PDF... (${processingTime} seconds elapsed)`}
+              
+            {timeoutWarningShown && (
+              <span style={{ color: '#f44336', fontWeight: 'bold' }}> 
+                {' '}Processing taking longer than expected. This may time out.
+              </span>
+            )}
+          </p>
+          <div style={{ 
+            width: '100%', 
+            height: '8px', 
+            backgroundColor: '#f0f0f0',
+            borderRadius: '4px',
+            overflow: 'hidden',
+            marginTop: '10px'
+          }}>
+            <div style={{
+              width: `${uploadProgress < 100 ? uploadProgress : Math.min((processingTime / 60) * 100, 95)}%`,
+              height: '100%',
+              backgroundColor: timeoutWarningShown ? '#f44336' : '#1a237e',
+              transition: 'width 0.5s ease',
+              animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
+            }}></div>
+          </div>
+          <style jsx>{`
+            @keyframes pulse {
+              0% { opacity: 0.6; }
+              50% { opacity: 1; }
+              100% { opacity: 0.6; }
+            }
+          `}</style>
+        </div>
+      )}
+    </div>
+  );
 
   // Render configuration screen
   const renderConfigScreen = () => (
@@ -610,183 +809,4 @@ function QuizRenderer() {
               }}
               style={{
                 backgroundColor: '#1a237e',
-                color: 'white',
-                padding: '10px 20px',
-                border: 'none',
-                borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
-              }}
-            >
-              Create New Quiz
-            </button>
-            
-            <button 
-              onClick={() => {
-                setAllQuestions([]);
-                setQuizMode(false);
-                setShowResults(false);
-              }}
-              style={{
-                backgroundColor: '#f5f5f5',
-                color: '#333',
-                padding: '10px 20px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
-              }}
-            >
-              Upload New PDF
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-
-  // Main render function
-  return (
-    <div className="container">
-      <div style={{
-        background: backendStatus.includes('Connected') ? '#e8f5e9' : '#ffebee',
-        padding: '10px',
-        borderRadius: '4px',
-        marginBottom: '20px'
-      }}>
-        <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>Using proxy to connect to backend</small></p>
-      </div>
-      
-      {/* Upload Section - Only show if not in quiz mode */}
-      {!quizMode && !allQuestions.length && (
-        <div style={{
-          marginBottom: '2rem',
-          padding: '1.5rem',
-          background: 'white',
-          borderRadius: '8px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }}>
-          <h2>Upload PDF</h2>
-          <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 3MB</strong></p>
-          <p><small>Tips for best results:
-            <ul style={{ marginTop: '5px', fontSize: '14px', color: '#666', paddingLeft: '20px' }}>
-              <li>Use smaller PDFs (under 3MB)</li>
-              <li>Use PDFs with clear question formatting (Q.1, Q.2, etc.)</li>
-              <li>Choose PDFs with clearly marked options (A. B. C. D.)</li>
-            </ul>
-          </small></p>
-          
-          <input 
-            type="file" 
-            accept=".pdf" 
-            onChange={handleFile}
-            disabled={loading}
-            style={{
-              display: 'block',
-              width: '100%',
-              padding: '20px',
-              background: '#f0f0f0',
-              border: '3px dashed #1a237e',
-              borderRadius: '8px',
-              margin: '20px 0',
-              cursor: loading ? 'not-allowed' : 'pointer'
-            }}
-          />
-          
-          {loading && (
-            <div style={{ marginBottom: '20px' }}>
-              <p>
-                {uploadProgress < 100 ? 
-                  `Uploading PDF (${uploadProgress}%)...` : 
-                  `Processing PDF... (${processingTime} seconds elapsed)`}
-                  
-                {timeoutWarningShown && (
-                  <span style={{ color: '#f44336', fontWeight: 'bold' }}> 
-                    {' '}Processing taking longer than expected. This may time out.
-                  </span>
-                )}
-              </p>
-              <div style={{ 
-                width: '100%', 
-                height: '8px', 
-                backgroundColor: '#f0f0f0',
-                borderRadius: '4px',
-                overflow: 'hidden',
-                marginTop: '10px'
-              }}>
-                <div style={{
-                  width: `${uploadProgress < 100 ? uploadProgress : Math.min((processingTime / 60) * 100, 95)}%`,
-                  height: '100%',
-                  backgroundColor: timeoutWarningShown ? '#f44336' : '#1a237e',
-                  transition: 'width 0.5s ease',
-                  animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
-                }}></div>
-              </div>
-              <style jsx>{`
-                @keyframes pulse {
-                  0% { opacity: 0.6; }
-                  50% { opacity: 1; }
-                  100% { opacity: 0.6; }
-                }
-              `}</style>
-            </div>
-          )}
-          
-          {error && (
-            <div style={{
-              color: 'red',
-              padding: '15px',
-              backgroundColor: '#ffebee',
-              borderRadius: '4px',
-              marginBottom: '20px'
-            }}>
-              <p><strong>Error:</strong> {error}</p>
-            </div>
-          )}
-        </div>
-      )}
-      
-      {/* Configuration Screen - Show after successful upload and not in quiz mode */}
-      {!quizMode && allQuestions.length > 0 && renderConfigScreen()}
-      
-      {/* Quiz Screen - Show in quiz mode */}
-      {quizMode && renderQuizQuestions()}
-    </div>
-  );
-}
-
-// Main App component (continued)
-function App() {
-  // Configure MathJax
-  const mathJaxConfig = {
-    loader: { load: ["input/asciimath", "output/chtml"] },
-    asciimath: {
-      delimiters: [
-        ["$", "$"],
-        ["`", "`"]
-      ]
-    }
-  };
-
-  return (
-    <div className="app-container">
-      <header className="app-header">
-        <h1>Quiz Generator Pro</h1>
-        <p>Upload a PDF to generate an interactive quiz from financial and mathematical content</p>
-      </header>
-      
-      <main className="app-main">
-        <MathJaxContext config={mathJaxConfig}>
-          <QuizRenderer />
-        </MathJaxContext>
-      </main>
-      
-      <footer className="app-footer">
-        <p>Quiz Generator Pro</p>
-      </footer>
-    </div>
-  );
-}
-
-export default App;
+                color
