@@ -99,7 +99,8 @@ function QuizRenderer() {
       
       console.log("Received PDF info:", data);
       setPdfInfo(data);
-      setTotalPages(data.total_pages);
+      setTotalPages
+(data.total_pages);
       setEndPage(data.total_pages - 1);
       setSelectedFile(file);
       
@@ -326,13 +327,7 @@ function QuizRenderer() {
 
   // Render PDF info and page range selection panel
   const renderPdfInfoPanel = () => (
-    <div style={{ 
-      marginBottom: '2rem',
-      padding: '1.5rem',
-      background: 'white',
-      borderRadius: '8px',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-    }}>
+    <div className="upload-section">
       <h2>PDF Information</h2>
       
       {pdfInfo && (
@@ -390,15 +385,7 @@ function QuizRenderer() {
           <button 
             onClick={processPdf}
             disabled={loading}
-            style={{
-              backgroundColor: loading ? '#ccc' : '#1a237e',
-              color: 'white',
-              padding: '12px 24px',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '16px',
-              cursor: loading ? 'not-allowed' : 'pointer'
-            }}
+            className="btn primary-btn"
           >
             {loading ? 'Processing...' : 'Process PDF'}
           </button>
@@ -409,16 +396,8 @@ function QuizRenderer() {
               setPdfInfo(null);
             }}
             disabled={loading}
-            style={{
-              backgroundColor: '#f5f5f5',
-              color: '#333',
-              padding: '12px 24px',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              fontSize: '16px',
-              marginLeft: '10px',
-              cursor: loading ? 'not-allowed' : 'pointer'
-            }}
+            className="btn secondary-btn"
+            style={{ marginLeft: '10px' }}
           >
             Cancel
           </button>
@@ -426,41 +405,28 @@ function QuizRenderer() {
       )}
       
       {loading && (
-        <div style={{ marginTop: '20px' }}>
+        <div className="progress-container" style={{ marginTop: '20px' }}>
           <p>
             {uploadProgress < 100 ? 
               `Uploading PDF (${uploadProgress}%)...` : 
               `Processing PDF... (${processingTime} seconds elapsed)`}
               
             {timeoutWarningShown && (
-              <span style={{ color: '#f44336', fontWeight: 'bold' }}> 
+              <span className="timeout-warning"> 
                 {' '}Processing taking longer than expected. This may time out.
               </span>
             )}
           </p>
-          <div style={{ 
-            width: '100%', 
-            height: '8px', 
-            backgroundColor: '#f0f0f0',
-            borderRadius: '4px',
-            overflow: 'hidden',
-            marginTop: '10px'
-          }}>
-            <div style={{
-              width: `${uploadProgress < 100 ? uploadProgress : Math.min((processingTime / 60) * 100, 95)}%`,
-              height: '100%',
-              backgroundColor: timeoutWarningShown ? '#f44336' : '#1a237e',
-              transition: 'width 0.5s ease',
-              animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
-            }}></div>
+          <div className="progress-bar-container">
+            <div 
+              className="progress-bar" 
+              style={{
+                width: `${uploadProgress < 100 ? uploadProgress : Math.min((processingTime / 60) * 100, 95)}%`,
+                backgroundColor: timeoutWarningShown ? 'var(--error-red)' : 'var(--primary-blue)',
+                animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
+              }}
+            ></div>
           </div>
-          <style jsx>{`
-            @keyframes pulse {
-              0% { opacity: 0.6; }
-              50% { opacity: 1; }
-              100% { opacity: 0.6; }
-            }
-          `}</style>
         </div>
       )}
     </div>
@@ -468,7 +434,7 @@ function QuizRenderer() {
 
   // Render configuration screen
   const renderConfigScreen = () => (
-    <div style={{ backgroundColor: '#f5f5f5', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
+    <div className="config-screen">
       <h2>Quiz Configuration</h2>
       <p>Successfully extracted {allQuestions.length} questions from your PDF.</p>
       
@@ -482,13 +448,7 @@ function QuizRenderer() {
             id="sectionSelector"
             value={selectedSection || ""}
             onChange={(e) => setSelectedSection(e.target.value || null)}
-            style={{ 
-              width: '100%', 
-              padding: '10px',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              marginBottom: '10px'
-            }}
+            className="section-selector"
           >
             <option value="">All Sections</option>
             {availableSections.map((section, idx) => (
@@ -501,7 +461,7 @@ function QuizRenderer() {
       )}
       
       {/* Number of questions slider */}
-      <div style={{ margin: '20px 0' }}>
+      <div className="slider-container">
         <label htmlFor="numQuestions" style={{ display: 'block', marginBottom: '10px', fontWeight: 'bold' }}>
           Number of questions in quiz (1-{Math.min(25, getFilteredQuestions().length)}):
         </label>
@@ -512,7 +472,7 @@ function QuizRenderer() {
           max={Math.min(25, getFilteredQuestions().length)}
           value={numQuestions}
           onChange={(e) => setNumQuestions(parseInt(e.target.value))}
-          style={{ width: '100%' }}
+          className="range-input"
         />
         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
           <span>1</span>
@@ -523,15 +483,7 @@ function QuizRenderer() {
       
       <button 
         onClick={startQuiz}
-        style={{
-          backgroundColor: '#1a237e',
-          color: 'white',
-          padding: '12px 24px',
-          border: 'none',
-          borderRadius: '4px',
-          fontSize: '16px',
-          cursor: 'pointer'
-        }}
+        className="btn primary-btn"
       >
         Start Quiz with {numQuestions} Questions
         {selectedSection && ` from "${selectedSection}"`}
@@ -541,18 +493,9 @@ function QuizRenderer() {
 
   // Render quiz questions
   const renderQuizQuestions = () => (
-    <div>
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        marginBottom: '20px',
-        padding: '15px',
-        backgroundColor: '#f0f0f0',
-        borderRadius: '8px'
-      }}>
-        <h2 style={{ margin: '0 0 10px 0' }}>Quiz ({quizQuestions.length} Questions)</h2>
+    <div className="quiz-container">
+      <div className="quiz-header">
+        <h2>Quiz ({quizQuestions.length} Questions)</h2>
         <div>
           <span style={{ marginRight: '15px' }}>
             Answered: {Object.keys(selectedAnswers).length} of {quizQuestions.length}
@@ -560,14 +503,7 @@ function QuizRenderer() {
           <button 
             onClick={submitQuiz}
             disabled={!areAllQuestionsAddressed()}
-            style={{
-              backgroundColor: !areAllQuestionsAddressed() ? '#ccc' : '#1a237e',
-              color: 'white',
-              padding: '8px 16px',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: !areAllQuestionsAddressed() ? 'not-allowed' : 'pointer'
-            }}
+            className={`btn ${areAllQuestionsAddressed() ? 'primary-btn' : 'disabled-btn'}`}
           >
             Submit Quiz
           </button>
@@ -575,146 +511,105 @@ function QuizRenderer() {
       </div>
       
       {/* Instructions for questions without options */}
-      <div style={{ 
-        padding: '10px', 
-        backgroundColor: '#fff8e1', 
-        borderRadius: '4px', 
-        marginBottom: '15px',
-        fontSize: '14px' 
-      }}>
+      <div className="instructions-box">
         <p><strong>Note:</strong> If a question has no options, use the "Skip this question" button.</p>
         <p>Questions without options are automatically marked as skipped.</p>
       </div>
       
       <div className="quiz-grid">
         {quizQuestions.map((question, idx) => (
-          <div key={idx} className="card" style={{ 
-            marginBottom: '30px',
-            background: 'white',
-            borderRadius: '8px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-          }}>
-            <div style={{
-              padding: '10px 15px',
-              backgroundColor: '#f0f0f0',
-              borderTopLeftRadius: '8px',
-              borderTopRightRadius: '8px',
-              borderBottom: '2px solid #1a237e'
-            }}>
+          <div key={idx} className="card">
+            <div className="card-header">
               <strong>Question {idx + 1}</strong>
-              {question.id && <span style={{ marginLeft: '10px', color: '#666' }}>(Q.{question.id})</span>}
+              {question.id && <span className="question-id">(Q.{question.id})</span>}
               {selectedAnswers[idx] === 'skipped' && 
-                <span style={{ marginLeft: '10px', color: '#f44336' }}>(Skipped)</span>
+                <span className="skipped-badge">(Skipped)</span>
               }
             </div>
             
-            <div style={{ padding: '15px' }}>
+            <div className="card-body">
               {/* Use MathJax for questions with math content */}
-              {question.contains_math ? (
-                <MathJax>{question.question}</MathJax>
-              ) : (
-                question.question
-              )}
+              <div className="question">
+                {question.contains_math ? (
+                  <MathJax>{question.question}</MathJax>
+                ) : (
+                  <div dangerouslySetInnerHTML={{ __html: question.question }} />
+                )}
+              </div>
               
               {/* Render table if present */}
               {question.has_table && question.table_html && (
                 <div 
+                  className="table-container"
                   dangerouslySetInnerHTML={{ __html: question.table_html }}
-                  style={{ 
-                    margin: '15px 0', 
-                    overflowX: 'auto',
-                    border: '1px solid #ddd',
-                    borderRadius: '4px',
-                    padding: '10px'
-                  }}
                 />
               )}
-            </div>
-            
-            {/* Options section */}
-            <div style={{ padding: '15px' }}>
-              {question.options && Object.keys(question.options).length > 0 ? (
-                Object.entries(question.options).map(([opt, text]) => (
-                  <div 
-                    key={opt} 
-                    onClick={() => handleAnswerSelect(idx, opt)}
-                    style={{
-                      padding: '10px 15px',
-                      margin: '10px 0',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      backgroundColor: selectedAnswers[idx] === opt ? '#e3f2fd' : 'white',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s ease'
-                    }}
-                  >
-                    <strong>{opt}.</strong> {question.contains_math ? <MathJax>{text}</MathJax> : text}
+              
+              {/* Options section */}
+              <div className="options">
+                {question.options && Object.keys(question.options).length > 0 ? (
+                  Object.entries(question.options).map(([opt, text]) => (
+                    <div 
+                      key={opt} 
+                      onClick={() => handleAnswerSelect(idx, opt)}
+                      className={`option ${selectedAnswers[idx] === opt ? 'selected-option' : ''}`}
+                    >
+                      <strong>{opt}.</strong> {" "}
+                      {question.contains_math ? 
+                        <MathJax>{text}</MathJax> : 
+                        <span dangerouslySetInnerHTML={{ __html: text }} />
+                      }
+                    </div>
+                  ))
+                ) : (
+                  <div className="no-options">
+                    <p>No options found for this question</p>
+                    <button
+                      onClick={() => handleAnswerSelect(idx, 'skipped')}
+                      className={`btn skip-btn ${selectedAnswers[idx] === 'skipped' ? 'skip-btn-active' : ''}`}
+                    >
+                      Skip this question
+                    </button>
                   </div>
-                ))
-              ) : (
-                <div>
-                  <p style={{ color: '#757575', fontStyle: 'italic' }}>No options found for this question</p>
-                  <button
-                    onClick={() => handleAnswerSelect(idx, 'skipped')}
-                    style={{
-                      padding: '10px 15px',
-                      margin: '10px 0',
-                      backgroundColor: selectedAnswers[idx] === 'skipped' ? '#ffebee' : '#f5f5f5',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    Skip this question
-                  </button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
             
             {/* Show answers only in results mode */}
             {showResults && (
-              <div style={{
-                padding: '15px',
-                margin: '10px 15px',
-                backgroundColor: '#f5f5f5',
-                borderRadius: '4px'
-              }}>
+              <div className="answer-section">
                 {/* Display all options with correct/incorrect highlighting */}
                 {question.options && Object.keys(question.options).length > 0 && (
-                  <div style={{ marginBottom: '15px' }}>
-                    {Object.entries(question.options).map(([opt, text]) => (
-                      <div 
-                        key={opt} 
-                        style={{
-                          padding: '10px 15px',
-                          margin: '10px 0',
-                          border: '1px solid #ddd',
-                          borderRadius: '4px',
-                          backgroundColor: 
-                            selectedAnswers[idx] === opt && opt === question.correct ? '#e8f5e9' :  // Correct answer selected
-                            selectedAnswers[idx] === opt && opt !== question.correct ? '#ffebee' :  // Wrong answer selected
-                            opt === question.correct ? '#e8f5e9' :  // Correct answer not selected
-                            'white',                                // Other options
-                          borderLeft: 
-                            opt === question.correct ? '4px solid #4caf50' :  // Correct answer
-                            selectedAnswers[idx] === opt && opt !== question.correct ? '4px solid #f44336' :  // Wrong answer selected
-                            'none'
-                        }}
-                      >
-                        <strong>{opt}.</strong> {question.contains_math ? <MathJax>{text}</MathJax> : text}
-                        {opt === question.correct && (
-                          <span style={{ marginLeft: '10px', color: '#4caf50' }}>✓ Correct</span>
-                        )}
-                        {selectedAnswers[idx] === opt && opt !== question.correct && (
-                          <span style={{ marginLeft: '10px', color: '#f44336' }}>✗ Incorrect</span>
-                        )}
-                      </div>
-                    ))}
+                  <div className="result-options">
+                    {Object.entries(question.options).map(([opt, text]) => {
+                      const isCorrect = opt === question.correct;
+                      const isSelected = selectedAnswers[idx] === opt;
+                      const isWrong = isSelected && !isCorrect;
+                      
+                      return (
+                        <div 
+                          key={opt} 
+                          className={`result-option ${isCorrect ? 'correct-option' : ''} ${isWrong ? 'wrong-option' : ''}`}
+                        >
+                          <strong>{opt}.</strong> {" "}
+                          {question.contains_math ? 
+                            <MathJax>{text}</MathJax> : 
+                            <span dangerouslySetInnerHTML={{ __html: text }} />
+                          }
+                          {isCorrect && (
+                            <span className="correct-badge">✓ Correct</span>
+                          )}
+                          {isWrong && (
+                            <span className="wrong-badge">✗ Incorrect</span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
                 
                 {/* Show explanation */}
-                <div style={{ marginTop: '15px' }}>
+                <div className="explanation">
                   <strong>Correct Answer:</strong> {
                     selectedAnswers[idx] === 'skipped' ? 
                     'Question skipped due to missing options' : 
@@ -723,21 +618,16 @@ function QuizRenderer() {
                   
                   {/* Show explanation if available */}
                   {question.explanation && (
-                    <div style={{ marginTop: '10px' }}>
+                    <div className="explanation-text">
                       <strong>Explanation:</strong> {question.explanation}
                     </div>
                   )}
                   
                   {/* Show "Things to Remember" section if available */}
                   {question.things_to_remember && question.things_to_remember.length > 0 && (
-                    <div style={{
-                      marginTop: '15px',
-                      padding: '10px',
-                      backgroundColor: '#f5f5f5',
-                      borderRadius: '4px'
-                    }}>
+                    <div className="things-to-remember">
                       <strong>Things to Remember:</strong>
-                      <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
+                      <ul>
                         {question.things_to_remember.map((item, i) => (
                           <li key={i}>{item}</li>
                         ))}
@@ -753,25 +643,17 @@ function QuizRenderer() {
       
       {/* Submit button at bottom */}
       {!showResults && (
-        <div style={{ textAlign: 'center', marginTop: '30px', marginBottom: '50px' }}>
+        <div className="submit-container">
           <button 
             onClick={submitQuiz}
             disabled={!areAllQuestionsAddressed()}
-            style={{
-              backgroundColor: !areAllQuestionsAddressed() ? '#ccc' : '#1a237e',
-              color: 'white',
-              padding: '12px 24px',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '16px',
-              cursor: !areAllQuestionsAddressed() ? 'not-allowed' : 'pointer'
-            }}
+            className={`btn ${areAllQuestionsAddressed() ? 'primary-btn' : 'disabled-btn'}`}
           >
             Submit Quiz
           </button>
           
           {!areAllQuestionsAddressed() && (
-            <p style={{ color: '#f44336', marginTop: '10px' }}>
+            <p className="validation-error">
               Please answer all questions or skip those without options.
             </p>
           )}
@@ -780,42 +662,28 @@ function QuizRenderer() {
       
       {/* Results summary */}
       {showResults && (
-        <div style={{ 
-          padding: '20px',
-          backgroundColor: '#e8f5e9',
-          borderRadius: '8px',
-          marginBottom: '30px',
-          textAlign: 'center'
-        }}>
+        <div className="results-container">
           <h2>Quiz Results</h2>
-          <div style={{ fontSize: '24px', margin: '15px 0' }}>
+          <div className="score-display">
             Your Score: <strong>{score}</strong> out of <strong>{quizStats.answerableQuestions}</strong>
-            <span style={{ marginLeft: '10px' }}>
+            <span className="percentage">
               ({quizStats.answerableQuestions > 0 ? Math.round((score / quizStats.answerableQuestions) * 100) : 0}%)
             </span>
           </div>
           
           {quizStats.skippedQuestions > 0 && (
-            <div style={{ fontSize: '16px', margin: '10px 0', color: '#757575' }}>
+            <div className="skipped-info">
               {quizStats.skippedQuestions} question(s) were skipped due to missing options
             </div>
           )}
           
-          <div>
+          <div className="action-buttons">
             <button 
               onClick={() => {
                 setQuizMode(false);
                 setShowResults(false);
               }}
-              style={{
-                backgroundColor: '#1a237e',
-                color: 'white',
-                padding: '10px 20px',
-                border: 'none',
-                borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
-              }}
+              className="btn primary-btn"
             >
               Create New Quiz
             </button>
@@ -826,15 +694,7 @@ function QuizRenderer() {
                 setQuizMode(false);
                 setShowResults(false);
               }}
-              style={{
-                backgroundColor: '#f5f5f5',
-                color: '#333',
-                padding: '10px 20px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                margin: '10px',
-                cursor: 'pointer'
-              }}
+              className="btn secondary-btn"
             >
               Upload New PDF
             </button>
@@ -847,29 +707,18 @@ function QuizRenderer() {
   // Main render function
   return (
     <div className="container">
-      <div style={{
-        background: backendStatus.includes('Connected') ? '#e8f5e9' : '#ffebee',
-        padding: '10px',
-        borderRadius: '4px',
-        marginBottom: '20px'
-      }}>
+      <div className={`status-bar ${backendStatus.includes('Connected') ? 'status-connected' : 'status-error'}`}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
         <p><small>Using proxy to connect to backend</small></p>
       </div>
       
       {/* Upload Section - Only show if not in quiz mode */}
       {!quizMode && !allQuestions.length && (
-        <div style={{
-          marginBottom: '2rem',
-          padding: '1.5rem',
-          background: 'white',
-          borderRadius: '8px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }}>
+        <div className="upload-section">
           <h2>Upload PDF</h2>
           <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 3MB</strong></p>
           <p><small>Tips for best results:
-            <ul style={{ marginTop: '5px', fontSize: '14px', color: '#666', paddingLeft: '20px' }}>
+            <ul className="tips-list">
               <li>Use smaller PDFs (under 3MB)</li>
               <li>Use PDFs with clear question formatting (Q.1, Q.2, etc.)</li>
               <li>Choose PDFs with clearly marked options (A. B. C. D.)</li>
@@ -883,29 +732,14 @@ function QuizRenderer() {
               accept=".pdf" 
               onChange={handleFile}
               disabled={loading}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '20px',
-                background: '#f0f0f0',
-                border: '3px dashed #1a237e',
-                borderRadius: '8px',
-                margin: '20px 0',
-                cursor: loading ? 'not-allowed' : 'pointer'
-              }}
+              className="file-input"
             />
           ) : (
             renderPdfInfoPanel()
           )}
           
           {error && (
-            <div style={{
-              color: 'red',
-              padding: '15px',
-              backgroundColor: '#ffebee',
-              borderRadius: '4px',
-              marginBottom: '20px'
-            }}>
+            <div className="error-message">
               <p><strong>Error:</strong> {error}</p>
             </div>
           )}
@@ -921,7 +755,7 @@ function QuizRenderer() {
   );
 }
 
-// Main App component (continued)
+// Main App component
 function App() {
   // Configure MathJax
   const mathJaxConfig = {
