@@ -2,9 +2,8 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJaxContext, MathJax } from 'better-react-mathjax';
 
-// Backend URL - use environment variable or fallback to proxy path
-const BACKEND_URL = import.meta.env.VITE_API_URL || "/api/proxy";
-const MAX_TIMEOUT = 55000; // 55 seconds timeout (just under Vercel's 60s limit)
+// Use the proxy by default to avoid CORS issues
+const BACKEND_URL = "/api/proxy";
 
 // QuizRenderer component (inlined to solve import issues)
 function QuizRenderer() {
@@ -111,7 +110,7 @@ function QuizRenderer() {
         formData,
         { 
           headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: MAX_TIMEOUT,
+          timeout: 55000, // 55 seconds timeout
           onUploadProgress: (progressEvent) => {
             const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
             setUploadProgress(percentCompleted);
@@ -458,7 +457,7 @@ function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}</small></p>
+        <p><small>Using proxy to connect to backend</small></p>
       </div>
       
       {/* Upload Section - Only show if not in quiz mode */}
