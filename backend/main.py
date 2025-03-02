@@ -322,7 +322,7 @@ def extract_tables_from_page(page) -> List[str]:
                     row = [span.get("text", "").strip() for span in line["spans"]]
                     table_data.append(row)
                 
-                /* APPENDED CHANGE: Only convert if at least one cell is non-empty */
+                # APPENDED CHANGE: Only convert if at least one cell is non-empty
                 if any(cell.strip() for row in table_data for cell in row):
                     html = "<table border='1'>\n"
                     html += "<tr>\n"
@@ -413,7 +413,8 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
             "correct": correct_answer,
             "explanation": explanation,
             "has_table": len(tables) > 0,
-            "table_html": "\n".join(tables) if tables else None,  /* APPENDED CHANGE */
+            # APPENDED CHANGE: Join all extracted tables into one HTML string.
+            "table_html": "\n".join(tables) if tables else None,
             "contains_math": contains_math
         }
         
@@ -559,4 +560,3 @@ def read_root():
 @app.options("/{path:path}")
 async def options_route(request: Request, path: str):
     return {}
-
