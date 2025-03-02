@@ -812,7 +812,7 @@ function QuizRenderer() {
                 color: 'white',
                 padding: '10px 20px',
                 border: 'none',
-                borderRadius: ''4px',
+                borderRadius: '4px',
                 margin: '10px',
                 cursor: 'pointer'
               }}
