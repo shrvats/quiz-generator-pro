@@ -27,7 +27,7 @@ export default async function handler(req, res) {
   const { path } = req.query;
   
   // Build the target URL - using the environment variable if set
-  const backendUrl = process.env.QUIZ_BACKEND_URL || 'https://quiz-backend-pro.onrender.com';
+  const backendUrl = process.env.QUIZ_BACKEND_URL || 'https://quiz-generator-pro.onrender.com';
   const targetUrl = `${backendUrl}/${path.join('/')}`;
   
   // Set a timeout of 50 seconds to allow for clean response handling
