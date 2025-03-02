@@ -164,7 +164,7 @@ export default function QuizRenderer() {
     setShowResults(true);
   };
 
-  // APPENDED CHANGE: Render configuration screen (unchanged from original with minor style tweaks)
+  /* APPENDED CHANGE: Render configuration screen (same as original with minor style tweaks) */
   const renderConfigScreen = () => (
     <div style={{ backgroundColor: '#f5f5f5', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
       <h2>Quiz Configuration</h2>
@@ -205,7 +205,7 @@ export default function QuizRenderer() {
     </div>
   );
 
-  // APPENDED CHANGE: Render quiz questions with updated clickable options and table checks
+  /* APPENDED CHANGE: Render quiz questions with updated clickable options and table checks */
   const renderQuizQuestions = () => {
     const answeredCount = Object.keys(selectedAnswers).length;
     
@@ -267,7 +267,7 @@ export default function QuizRenderer() {
                   <div>{question.question}</div>
                 )}
                 
-                {/* APPENDED CHANGE: Only render table if table_html exists, is non-empty, and contains a table tag */}
+                {/* APPENDED CHANGE: Render table only if table_html exists, is non-empty, and includes a table tag */}
                 {question.has_table &&
                  question.table_html &&
                  question.table_html.trim() !== '' &&
@@ -288,7 +288,8 @@ export default function QuizRenderer() {
                       onClick={() => handleAnswerSelect(idx, opt)}
                       style={{
                         cursor: 'pointer',
-                        backgroundColor: selectedAnswers[idx] === opt ? '#e3f2fd' : '#fff'
+                        /* APPENDED CHANGE: use a CSS variable for the selected option background color */
+                        backgroundColor: selectedAnswers[idx] === opt ? 'var(--success-green)' : '#fff'
                       }}
                     >
                       <strong>{opt}.</strong> {" "}
@@ -315,7 +316,7 @@ export default function QuizRenderer() {
                     borderRadius: '4px',
                     padding: '10px 15px',
                     cursor: 'pointer',
-                    backgroundColor: selectedAnswers[idx] === 'skipped' ? '#e3f2fd' : '#fff'
+                    backgroundColor: selectedAnswers[idx] === 'skipped' ? 'var(--success-green)' : '#fff'
                   }}
                 >
                   Skip this question
