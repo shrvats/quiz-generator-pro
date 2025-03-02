@@ -288,17 +288,14 @@ def extract_text_between_options(doc, question: Dict) -> Dict:
                 if (block["page"] == current_block["page"] and 
                     block["bbox"][1] > current_block["bbox"][3] and
                     block["bbox"][3] < next_block["bbox"][1] and
-                    # Skip blocks that are far to the right (likely not part of the option)
                     block["bbox"][0] < current_block["bbox"][0] + 100):
                     between_blocks.append(block)
             
             # If we found blocks between options, add their text to the current option
             if between_blocks:
                 between_text = " ".join(b["text"] for b in between_blocks)
-                # Make sure not to add the next option's heading
                 between_text = re.sub(r'[A-D][\.\)].*$', '', between_text)
                 
-                # Update the option text
                 if current_option in result["options"]:
                     result["options"][current_option] += " " + between_text.strip()
     
@@ -307,51 +304,36 @@ def extract_text_between_options(doc, question: Dict) -> Dict:
 def extract_tables_from_page(page) -> List[str]:
     """Extract tables from a page and convert to HTML"""
     tables = []
-    
-    # Get page dimensions
-    page_width, page_height = page.rect.width, page.rect.height
-    
-    # Try to find tables using layout analysis
     blocks = page.get_text("dict")["blocks"]
-    
-    # Group blocks by position to identify potential tables
-    potential_tables = []
     
     for block in blocks:
         if "lines" not in block:
             continue
             
-        # Check if block contains multiple lines with similar structure (potential table)
         lines_with_spans = [line for line in block["lines"] if "spans" in line]
         
         if len(lines_with_spans) >= 3:  # At least 3 lines needed for a table
-            # Check if lines have similar number of spans (columns)
             span_counts = [len(line["spans"]) for line in lines_with_spans]
             
             if max(span_counts) >= 2 and max(span_counts) - min(span_counts) <= 1:
-                # Potential table found
                 table_data = []
                 
                 for line in lines_with_spans:
                     row = [span.get("text", "").strip() for span in line["spans"]]
                     table_data.append(row)
                 
-                # Convert to HTML
-                if any(row for row in table_data):
+                /* APPENDED CHANGE: Only convert if at least one cell is non-empty */
+                if any(cell.strip() for row in table_data for cell in row):
                     html = "<table border='1'>\n"
-                    
-                    # First row as header
                     html += "<tr>\n"
                     for cell in table_data[0]:
                         html += f"  <th>{cell}</th>\n"
                     html += "</tr>\n"
                     
-                    # Rest of rows as data
                     for row in table_data[1:]:
                         html += "<tr>\n"
                         for cell in row:
                             cell_class = ""
-                            # Right-align numeric cells
                             if re.match(r'^[\d\.\$]+$', cell):
                                 cell_class = " align='right'"
                             html += f"  <td{cell_class}>{cell}</td>\n"
@@ -364,28 +346,25 @@ def extract_tables_from_page(page) -> List[str]:
 
 def extract_mathematical_content(text: str) -> Tuple[str, bool]:
     """Enhance and identify mathematical content in text"""
-    # Patterns that indicate mathematical content
     math_patterns = [
-        r'[=\+\-\*\/\^\(\)]',  # Basic operators
-        r'\d+\.\d+',            # Decimal numbers
-        r'[αβγδεζηθικλμνξοπρστυφχψω]',  # Greek lowercase
-        r'[ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]',  # Greek uppercase
-        r'√|∑|∫|∂|∇|∞',        # Math symbols
-        r'\b[A-Za-z]\s*=',      # Variable assignments
-        r'log|exp|sin|cos|tan', # Functions
-        r'var|std|avg|mean',    # Statistical terms
+        r'[=\+\-\*\/\^\(\)]',
+        r'\d+\.\d+',
+        r'[αβγδεζηθικλμνξοπρστυφχψω]',
+        r'[ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]',
+        r'√|∑|∫|∂|∇|∞',
+        r'\b[A-Za-z]\s*=',
+        r'log|exp|sin|cos|tan',
+        r'var|std|avg|mean',
     ]
     
     contains_math = any(re.search(pattern, text) for pattern in math_patterns)
     
-    # If contains math, try to improve readability
     if contains_math:
-        # Format common mathematical symbols for better display
         replacements = [
-            (r'(\d+)\/(\d+)', r'\1÷\2'),  # Improve fractions
-            (r'(\w+)\^(\w+)', r'\1^{\2}'),  # Format powers
-            (r'sqrt\(([^)]+)\)', r'√(\1)'),  # Format square roots
-            (r'alpha', 'α'), (r'beta', 'β'), (r'gamma', 'γ'),  # Greek letters
+            (r'(\d+)\/(\d+)', r'\1÷\2'),
+            (r'(\w+)\^(\w+)', r'\1^{\2}'),
+            (r'sqrt\(([^)]+)\)', r'√(\1)'),
+            (r'alpha', 'α'), (r'beta', 'β'), (r'gamma', 'γ'),
             (r'delta', 'δ'), (r'sigma', 'σ'), (r'theta', 'θ'),
             (r'mu', 'μ'), (r'pi', 'π'), (r'lambda', 'λ')
         ]
@@ -396,24 +375,19 @@ def extract_mathematical_content(text: str) -> Tuple[str, bool]:
     return text, contains_math
 
 def process_questions_and_options(identified_questions: List[Dict], doc) -> List[Dict]:
-    """Process identified questions to extract options and correct answers"""
+    """Process identified questions to extract options and correct answers from categorized blocks"""
     processed_questions = []
     
     for question in identified_questions:
-        # First, try to improve option extraction using layout information
         enhanced_question = extract_text_between_options(doc, question)
         
-        # Extract options more carefully
         options = {}
         correct_answer = None
         
-        # Normalize existing options
         for key, value in enhanced_question["options"].items():
-            # Remove any correct answer text from options
             clean_value = re.sub(r'.*correct answer is.*', '', value, flags=re.IGNORECASE)
             options[key] = clean_value.strip()
         
-        # Try to extract correct answer from explanation
         explanation = enhanced_question.get("explanation", "")
         if explanation:
             answer_match = re.search(r'correct answer is\s+([A-D])|answer\s+is\s+([A-D])', explanation, re.IGNORECASE)
@@ -421,21 +395,17 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
                 correct = next((g for g in answer_match.groups() if g), "")
                 correct_answer = correct
         
-        # Extract any tables in the question
+        # APPENDED CHANGE: Extract and store all tables as one concatenated HTML string.
         tables = []
         page_nums = set(block["page"] for block in enhanced_question["blocks"])
-        
         for page_num in page_nums:
             tables.extend(extract_tables_from_page(doc[page_num]))
         
-        # Process any mathematical content
         question_text, contains_math = extract_mathematical_content(enhanced_question["text"])
         
-        # Process options for mathematical content
         for key, value in options.items():
             options[key], _ = extract_mathematical_content(value)
         
-        # Create cleaned question object
         processed_question = {
             "id": enhanced_question["id"],
             "question": question_text,
@@ -443,7 +413,7 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
             "correct": correct_answer,
             "explanation": explanation,
             "has_table": len(tables) > 0,
-            "table_html": tables[0] if tables else None,
+            "table_html": "\n".join(tables) if tables else None,  /* APPENDED CHANGE */
             "contains_math": contains_math
         }
         
@@ -456,50 +426,33 @@ def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) ->
     start_time = time.time()
     
     try:
-        # Open the PDF with PyMuPDF
         doc = fitz.open(file_path)
-        
-        # Get total page count
         total_pages = len(doc)
-        
-        # If page range is not specified, process the entire document
         if page_range is None:
             page_range = (0, total_pages - 1)
         
-        # Strategy: Use layout analysis instead of just text patterns
-        # 1. Extract blocks with position information
-        # 2. Categorize blocks (questions, options, explanations)
-        # 3. Group blocks into complete questions
-        # 4. Extract tables and mathematical content
-        
-        # Extract blocks with positions for the specified page range
         blocks = extract_blocks_with_positions(doc, page_range)
         
         if check_time_limit(start_time):
             return {"error": "Processing time limit exceeded during block extraction", "questions": [], "total_pages": total_pages}
         
-        # Categorize blocks by purpose
         categorized = categorize_blocks(blocks)
         
         if check_time_limit(start_time):
             return {"error": "Processing time limit exceeded during block categorization", "questions": [], "total_pages": total_pages}
             
-        # Identify individual questions
         identified_questions = identify_questions_from_blocks(blocks)
         
         if check_time_limit(start_time):
             return {"error": "Processing time limit exceeded during question identification", "questions": [], "total_pages": total_pages}
         
-        # Process each question to extract components
         processed_questions = process_questions_and_options(identified_questions, doc)
         
         if check_time_limit(start_time):
             return {"error": "Processing time limit exceeded during question processing", "questions": processed_questions, "total_pages": total_pages}
         
-        # Sort questions by ID
         processed_questions.sort(key=lambda q: q["id"])
         
-        # Return the processed questions along with page information
         return {
             "questions": processed_questions,
             "total_questions": len(processed_questions),
@@ -523,7 +476,6 @@ async def handle_pdf(
         print(f"Received file: {file.filename}")
         start_time = time.time()
         
-        # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             tmp.write(content)
@@ -532,26 +484,22 @@ async def handle_pdf(
         print(f"Processing file at: {tmp_path}")
         print(f"Page range requested: {start_page} to {end_page}")
         
-        # Determine page range
         page_range = None
         if start_page is not None and end_page is not None:
             page_range = (int(start_page), int(end_page))
         
-        # Process the PDF with timeout protection
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(process_pdf, tmp_path, page_range),
-                timeout=55.0  # Allow 55 seconds max (within Vercel's 60s limit)
+                timeout=55.0
             )
         except asyncio.TimeoutError:
-            # Clean up
             os.unlink(tmp_path)
             raise HTTPException(
                 status_code=408, 
                 detail="PDF processing timed out. Please try a smaller PDF file or fewer pages."
             )
         
-        # Clean up
         os.unlink(tmp_path)
         
         if "error" in result and not result.get("questions", []):
@@ -569,20 +517,15 @@ async def handle_pdf(
 async def get_pdf_info(file: UploadFile = File(...)):
     """Get basic PDF information without processing content"""
     try:
-        # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
         
-        # Open PDF to get page count
         doc = fitz.open(tmp_path)
         total_pages = len(doc)
-        
-        # Get file size in MB
         file_size = os.path.getsize(tmp_path) / (1024 * 1024)
         
-        # Extract metadata
         metadata = {
             "title": doc.metadata.get("title", ""),
             "author": doc.metadata.get("author", ""),
@@ -591,7 +534,6 @@ async def get_pdf_info(file: UploadFile = File(...)):
             "producer": doc.metadata.get("producer", "")
         }
         
-        # Clean up
         doc.close()
         os.unlink(tmp_path)
         
@@ -617,3 +559,4 @@ def read_root():
 @app.options("/{path:path}")
 async def options_route(request: Request, path: str):
     return {}
+
