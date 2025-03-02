@@ -30,7 +30,7 @@ async def add_cors_header(request: Request, call_next):
     return response
 
 # Configuration
-MAX_PROCESSING_TIME = 54  # seconds, to stay under Vercel's 60s limit
+MAX_PROCESSING_TIME = 119  # seconds, to stay under Vercel's 60s limit
 
 def clean_text(text: str) -> str:
     """Clean text by removing copyright notices, page numbers, etc."""
