@@ -6,12 +6,6 @@
     { "source": "/api/proxy/:path*", "destination": "/api/proxy/[...path].js" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
-  "functions": {
-    "api/proxy/[...path].js": {
-      "memory": 1024,
-      "maxDuration": 60
-    }
-  },
   "headers": [
     {
       "source": "/api/(.*)",
