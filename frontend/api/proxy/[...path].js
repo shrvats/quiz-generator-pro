@@ -1,83 +1,141 @@
-// File: api/proxy/[...path].js
+import fetch from 'node-fetch';
+import { createReadStream } from 'fs';
+import FormData from 'form-data';
+import multer from 'multer';
+import { NextResponse } from 'next/server';
+
+// Configure multer for file uploads
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
+
+// Middleware to handle multipart form data
+const runMiddleware = (req, res, fn) => {
+  return new Promise((resolve, reject) => {
+    fn(req, res, (result) => {
+      if (result instanceof Error) {
+        return reject(result);
+      }
+      return resolve(result);
+    });
+  });
+};
+
 export default async function handler(req, res) {
+  // Get the path parameters
+  const { path } = req.query;
+  
+  // Build the target URL - using the environment variable if set
+  const backendUrl = process.env.QUIZ_BACKEND_URL || 'https://quiz-backend-pro.onrender.com';
+  const targetUrl = `${backendUrl}/${path.join('/')}`;
+  
+  // Set a timeout of 50 seconds to allow for clean response handling
+  // before the 60-second Vercel function limit is reached
+  const TIMEOUT_MS = 50000;
+  
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  // Handle OPTIONS request
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
-
+  
   try {
-    // Get path from request
-    const path = req.query.path || [];
-    const targetPath = '/' + path.join('/');
+    let response;
     
-    // Use the correct URL
-    const url = `https://quiz-generator-pro.onrender.com${targetPath}`;
-    
-    console.log(`Proxying ${req.method} request to: ${url}`);
-
-    // Create fetch options
-    const fetchOptions = {
-      method: req.method,
-      headers: {}
-    };
-
-    // Set content type for non-GET requests
-    if (req.method !== 'GET' && req.headers['content-type']) {
-      fetchOptions.headers['Content-Type'] = req.headers['content-type'];
-    }
-
-    // Handle file uploads for POST requests with multipart/form-data
-    if (req.method === 'POST' && 
-        req.headers['content-type'] && 
-        req.headers['content-type'].includes('multipart/form-data')) {
+    // Handle file uploads specially
+    if (req.headers['content-type']?.includes('multipart/form-data')) {
+      // Use multer to parse the form data
+      await runMiddleware(req, res, upload.single('file'));
       
-      // For file uploads, we need to get the raw body
-      const chunks = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      // Create a new form data object to send to the backend
+      const formData = new FormData();
+      if (req.file) {
+        formData.append('file', req.file.buffer, {
+          filename: req.file.originalname,
+          contentType: req.file.mimetype
+        });
       }
-      const buffer = Buffer.concat(chunks);
       
-      // Add boundary to content type
-      const contentType = req.headers['content-type'];
-      fetchOptions.headers['Content-Type'] = contentType;
+      // Forward the file to the backend with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
       
-      // Set the buffer as the request body
-      fetchOptions.body = buffer;
-    } else if (req.method !== 'GET' && req.body) {
-      // For regular JSON requests
-      fetchOptions.body = JSON.stringify(req.body);
+      response = await fetch(targetUrl, {
+        method: 'POST',
+        body: formData,
+        headers: formData.getHeaders(),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+    } else {
+      // For non-file requests, forward as normal
+      const fetchOptions = {
+        method: req.method,
+        headers: {
+          'Content-Type': req.headers['content-type'] || 'application/json'
+        }
+      };
+      
+      // Add body for non-GET requests
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        fetchOptions.body = JSON.stringify(req.body);
+      }
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      
+      fetchOptions.signal = controller.signal;
+      response = await fetch(targetUrl, fetchOptions);
+      
+      clearTimeout(timeoutId);
     }
 
-    // Forward request to backend
-    const response = await fetch(url, fetchOptions);
+    // Get content type and data from the response
+    const contentType = response.headers.get('content-type');
+    let data;
     
-    // Get response as text
-    const text = await response.text();
+    if (contentType?.includes('application/json')) {
+      data = await response.json();
+    } else {
+      data = await response.text();
+    }
     
-    // Send response
+    // Set the appropriate status and send the response
     res.status(response.status);
     
-    // Set content type if available
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
+    if (contentType?.includes('application/json')) {
+      res.json(data);
+    } else {
+      res.send(data);
     }
-    
-    // Send response body
-    res.send(text);
   } catch (error) {
     console.error('Proxy error:', error);
-    res.status(500).json({ 
-      error: 'Proxy Error', 
-      message: error.message,
-      url: `https://quiz-generator-pro.onrender.com${req.url.replace(/^\/api\/proxy/, '')}`
-    });
+    
+    // Check if this is a timeout/abort error
+    if (error.name === 'AbortError') {
+      res.status(504).json({
+        error: 'Gateway Timeout',
+        details: 'The PDF processing took too long. Please try a smaller PDF or one with fewer pages.'
+      });
+    } else {
+      res.status(500).json({
+        error: 'Failed to fetch from API',
+        details: error.message
+      });
+    }
   }
 }
+
+export const config = {
+  api: {
+    bodyParser: false, // Disable the default body parser
+    externalResolver: true
+  }
+};
