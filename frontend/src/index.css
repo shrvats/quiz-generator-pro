@@ -44,11 +44,13 @@ body {
   margin: 1.5rem 0;
 }
 
+/* APPENDED CHANGE: Ensure options are clickable */
 .option {
   padding: 1rem;
   margin: 0.5rem 0;
   border: 1px solid #ddd;
   border-radius: 4px;
+  cursor: pointer;
 }
 
 .option:hover {
