@@ -809,14 +809,13 @@ function QuizRenderer() {
               }}
               style={{
                 backgroundColor: '#1a237e',
-                color
                 color: 'white',
                 padding: '10px 20px',
                 border: 'none',
                 borderRadius: '4px',
                 margin: '10px',
                 cursor: 'pointer'
-              }}
+                 }}
             >
               Create New Quiz
             </button>
