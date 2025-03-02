@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJax } from 'better-react-mathjax';
 
-// Backend URL
-const BACKEND_URL = "https://quiz-generator-pro.onrender.com";
-const MAX_TIMEOUT = 180000; // 3 minutes timeout
+// Backend URL - use environment variable or fallback to proxy path
+const BACKEND_URL = import.meta.env.VITE_API_URL || "/api/proxy";
+const MAX_TIMEOUT = 55000; // 55 seconds timeout (just under Vercel's 60s limit)
 
 export default function QuizRenderer() {
   // Main states
@@ -25,6 +25,7 @@ export default function QuizRenderer() {
   const [processingTime, setProcessingTime] = useState(0);
   const [processingTimer, setProcessingTimer] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [timeoutWarningShown, setTimeoutWarningShown] = useState(false);
 
   // Check backend health on load
   useEffect(() => {
@@ -41,10 +42,39 @@ export default function QuizRenderer() {
     };
   }, [processingTimer]);
 
+  // Validate file size and type
+  const validateFile = (file) => {
+    // Recommend limiting files to 5MB for reliable processing within the time limit
+    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+    
+    if (!file.type.includes('pdf')) {
+      return {
+        valid: false,
+        message: 'Please upload a PDF file.'
+      };
+    }
+    
+    if (file.size > MAX_FILE_SIZE) {
+      return {
+        valid: false,
+        message: `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload a PDF smaller than 5MB.`
+      };
+    }
+    
+    return { valid: true };
+  };
+
   // Handle file upload
   const handleFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    
+    // Validate file
+    const validation = validateFile(file);
+    if (!validation.valid) {
+      setError(validation.message);
+      return;
+    }
     
     // Reset states
     setLoading(true);
@@ -56,10 +86,18 @@ export default function QuizRenderer() {
     setQuizQuestions([]);
     setSelectedAnswers({});
     setShowResults(false);
+    setTimeoutWarningShown(false);
     
     // Start timer
     const timer = setInterval(() => setProcessingTime(prev => prev + 1), 1000);
     setProcessingTimer(timer);
+    
+    // Set timeout warning
+    const timeoutWarning = setTimeout(() => {
+      if (loading) {
+        setTimeoutWarningShown(true);
+      }
+    }, 40000); // Show warning after 40 seconds
     
     try {
       // Create form data
@@ -80,6 +118,7 @@ export default function QuizRenderer() {
         }
       );
       
+      clearTimeout(timeoutWarning);
       console.log("Received quiz data:", data);
       
       if (data.length === 0) {
@@ -89,8 +128,17 @@ export default function QuizRenderer() {
         setNumQuestions(Math.min(10, data.length)); // Default to 10 questions or less if fewer available
       }
     } catch (err) {
+      clearTimeout(timeoutWarning);
       console.error('Upload failed:', err);
-      setError(`Upload failed: ${err.message || 'Unknown error'}`);
+      
+      // Handle different error types
+      if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+        setError(`Processing timeout: Your PDF may be too large or complex to process within the time limit. Please try a smaller PDF or one with fewer pages.`);
+      } else if (err.response && err.response.status === 504) {
+        setError(`Gateway Timeout: The server took too long to process your PDF. Try a smaller PDF or one with fewer pages.`);
+      } else {
+        setError(`Upload failed: ${err.message || 'Unknown error'}`);
+      }
     } finally {
       setLoading(false);
       clearInterval(timer);
@@ -409,7 +457,7 @@ export default function QuizRenderer() {
         marginBottom: '20px'
       }}>
         <p><strong>Backend Status:</strong> {backendStatus}</p>
-        <p><small>Using direct backend connection to {BACKEND_URL}</small></p>
+        <p><small>Using {BACKEND_URL.includes('api/proxy') ? 'proxy to backend' : 'direct backend connection'}</small></p>
       </div>
       
       {/* Upload Section - Only show if not in quiz mode */}
@@ -422,7 +470,8 @@ export default function QuizRenderer() {
           boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
         }}>
           <h2>Upload PDF</h2>
-          <p>Upload a PDF file containing quiz questions.</p>
+          <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 5MB</strong></p>
+          <p><small>Larger files may exceed processing time limits.</small></p>
           
           <input 
             type="file" 
@@ -447,6 +496,12 @@ export default function QuizRenderer() {
                 {uploadProgress < 100 ? 
                   `Uploading PDF (${uploadProgress}%)...` : 
                   `Processing PDF... (${processingTime} seconds elapsed)`}
+                  
+                {timeoutWarningShown && (
+                  <span style={{ color: '#f44336', fontWeight: 'bold' }}> 
+                    {' '}Processing taking longer than expected. This may time out.
+                  </span>
+                )}
               </p>
               <div style={{ 
                 width: '100%', 
@@ -459,7 +514,7 @@ export default function QuizRenderer() {
                 <div style={{
                   width: `${uploadProgress < 100 ? uploadProgress : Math.min((processingTime / 60) * 100, 95)}%`,
                   height: '100%',
-                  backgroundColor: '#1a237e',
+                  backgroundColor: timeoutWarningShown ? '#f44336' : '#1a237e',
                   transition: 'width 0.5s ease',
                   animation: uploadProgress === 100 ? 'pulse 2s infinite' : 'none'
                 }}></div>
