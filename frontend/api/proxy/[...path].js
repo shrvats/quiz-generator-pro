@@ -14,11 +14,12 @@ export default async function handler(request) {
     const backendUrl = 'https://quiz-generator-pro.onrender.com';
     const targetUrl = `${backendUrl}/${path}`;
     
-    // Forward the request including method, headers, and body
+    // Forward the request as is, including all headers and the body
     const response = await fetch(targetUrl, {
       method: request.method,
       headers: request.headers,
-      body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body
+      body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
+      duplex: 'half' // Important for streaming body content
     });
     
     // Return the response directly
@@ -33,7 +34,7 @@ export default async function handler(request) {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       }
     });
