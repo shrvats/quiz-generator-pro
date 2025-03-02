@@ -65,6 +65,12 @@ def is_table_of_contents(text: str) -> bool:
     for pattern in TABLE_OF_CONTENTS_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return True
+    
+    # Also check for characteristic TOC patterns (chapter numbers followed by page numbers)
+    toc_pattern = r'\n\s*\d+\s+.*?\s+\d+\s*\n'
+    if re.search(toc_pattern, text):
+        return True
+        
     return False
 
 def extract_sections(text: str) -> Dict[str, Dict]:
@@ -186,29 +192,79 @@ def convert_to_html_table(table_lines: List[str]) -> str:
     return html
 
 def extract_options_advanced(question_text: str) -> Dict[str, str]:
-    """Extract options from question text including mathematical content"""
+    """Extract options from question text, carefully separating from explanations and answers"""
     options = {}
     
-    # Try multiple patterns to find options
+    # First, try to detect where the options section ends
+    explanation_patterns = [
+        r'The correct answer is [A-D]',
+        r'Correct answer: [A-D]',
+        r'ANSWER\s*:',
+        r'Things to Remember',
+        r'Explanation:'
+    ]
     
-    # Pattern 1: Letter followed by period or parenthesis
+    # Find the earliest occurrence of an explanation pattern
+    earliest_explanation_pos = len(question_text)
+    for pattern in explanation_patterns:
+        match = re.search(pattern, question_text, re.IGNORECASE)
+        if match and match.start() < earliest_explanation_pos:
+            earliest_explanation_pos = match.start()
+    
+    # Extract only the part before explanations for option parsing
+    options_text = question_text[:earliest_explanation_pos]
+    
+    # Now extract options from the limited text
     pattern1 = re.compile(r'([A-D])[\.\)]\s+(.*?)(?=(?:[A-D][\.\)])|$)', re.DOTALL)
-    matches1 = list(pattern1.finditer(question_text))
+    matches1 = list(pattern1.finditer(options_text))
     
     if matches1:
         for match in matches1:
             option_letter = match.group(1)
             option_text = match.group(2).strip()
+            
+            # Double-check no answer text is included
+            for pattern in explanation_patterns:
+                explanation_match = re.search(pattern, option_text, re.IGNORECASE)
+                if explanation_match:
+                    option_text = option_text[:explanation_match.start()].strip()
+            
             options[option_letter] = option_text
     else:
-        # Pattern 2: Options in a list format
-        lines = question_text.split('\n')
+        # Alternative approach: line by line
+        lines = options_text.split('\n')
+        current_option = None
+        current_text = []
+        
         for line in lines:
-            match = re.match(r'\s*([A-D])[\.)\s]\s*(.*)', line)
-            if match:
-                option_letter = match.group(1)
-                option_text = match.group(2).strip()
-                options[option_letter] = option_text
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if this line starts a new option
+            option_match = re.match(r'\s*([A-D])[\.)\s]\s*(.*)', line)
+            
+            if option_match:
+                # Save previous option if any
+                if current_option and current_text:
+                    options[current_option] = ' '.join(current_text).strip()
+                    current_text = []
+                
+                # Start new option
+                current_option = option_match.group(1)
+                current_text.append(option_match.group(2))
+            elif current_option and current_text:
+                # Check if this line contains answer text
+                contains_explanation = any(re.search(pattern, line, re.IGNORECASE) for pattern in explanation_patterns)
+                if not contains_explanation:
+                    current_text.append(line)
+                else:
+                    # Stop collecting option text once we hit explanation
+                    break
+        
+        # Save last option
+        if current_option and current_text:
+            options[current_option] = ' '.join(current_text).strip()
     
     return options
 
@@ -218,72 +274,114 @@ def extract_correct_answer(text: str) -> Optional[str]:
         r'(?:The|THE)\s+correct\s+answer\s+is\s+([A-D])',
         r'([A-D])\s+is\s+the\s+correct\s+answer',
         r'ANSWER\s*:\s*([A-D])',
+        r'Correct answer\s*:\s*([A-D])',
+        r'correct answer:\s*([A-D])',
         r'answer\s+is\s+([A-D])'
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1)
     
     return None
 
+def extract_things_to_remember(text: str) -> List[str]:
+    """Extract 'Things to Remember' section from question text"""
+    things_to_remember = []
+    
+    # Find the 'Things to Remember' section
+    patterns = [
+        r'Things to Remember:(.*?)(?=$|(?:The correct answer))',
+        r'Things to Remember:(.*)',
+        r'Things to remember:(.*)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            # Process the content
+            content = match.group(1).strip()
+            
+            # Split into bullet points if present
+            if '•' in content:
+                bullet_points = content.split('•')
+                for point in bullet_points:
+                    if point.strip():
+                        things_to_remember.append(point.strip())
+            else:
+                # Otherwise add as a single item or split by newlines
+                lines = content.split('\n')
+                if len(lines) > 1:
+                    for line in lines:
+                        if line.strip():
+                            things_to_remember.append(line.strip())
+                else:
+                    things_to_remember.append(content)
+            
+            break
+    
+    return things_to_remember
+
 def process_question(question_text: str, q_id: str, idx: int) -> Dict:
-    """Process a single question block with enhanced handling for math/tables"""
+    """Process a single question block with improved separation of content"""
     # Clean the text of unwanted elements
     cleaned_text = clean_text(question_text)
-    lines = cleaned_text.split('\n')
     
     # Initialize question components
     main_question = ""
-    options = {}
-    correct_answer = ""
     explanation = ""
-    things_to_remember = []
     
-    # Check for tables in the question (crucial for financial/math questions)
+    # Check for tables in the question
     table_html = extract_table_from_text(cleaned_text)
     
-    # Extract options with enhanced detection for financial content
+    # Extract options with enhanced separation from explanations
     options = extract_options_advanced(cleaned_text)
     
     # Extract correct answer
     correct_answer = extract_correct_answer(cleaned_text)
     
-    # Extract main question - usually everything before options
-    question_parts = cleaned_text.split('?')
-    if len(question_parts) > 1:
-        main_question = question_parts[0].strip() + '?'
-    else:
-        # Find first occurrence of an option marker
-        option_markers = [f"{letter}." for letter in "ABCD"] + [f"{letter})" for letter in "ABCD"]
-        first_option_pos = float('inf')
-        
-        for marker in option_markers:
-            pos = cleaned_text.find(marker)
+    # Extract things to remember section
+    things_to_remember = extract_things_to_remember(cleaned_text)
+    
+    # Extract main question - get everything before the first option
+    first_option_pos = float('inf')
+    for letter in "ABCD":
+        patterns = [f"{letter}.", f"{letter})"]
+        for pattern in patterns:
+            pos = cleaned_text.find(pattern)
             if 0 <= pos < first_option_pos:
                 first_option_pos = pos
-        
-        if first_option_pos < float('inf'):
-            main_question = cleaned_text[:first_option_pos].strip()
+    
+    if first_option_pos < float('inf'):
+        main_question = cleaned_text[:first_option_pos].strip()
+    else:
+        # Fallback: try to extract question by looking for a question mark
+        question_parts = cleaned_text.split('?')
+        if len(question_parts) > 1:
+            main_question = question_parts[0].strip() + '?'
         else:
-            # Fallback: use first non-empty line
+            # Second fallback: use first non-empty line
+            lines = cleaned_text.split('\n')
             for line in lines:
                 if line.strip() and not re.match(r'Q\.?\s*\d+\s*$', line):
                     main_question = line.strip()
                     break
     
-    # Look for explanations
-    explanation_start = None
-    for i, line in enumerate(lines):
-        if ("correct answer" in line.lower() or 
-            "explanation" in line.lower() or 
-            "things to remember" in line.lower()):
-            explanation_start = i
-            break
+    # Look for explanations that aren't in "Things to Remember"
+    explanation_patterns = [
+        r'The correct answer is [A-D].*?(?=Things to Remember:|$)',
+        r'Explanation:(.*?)(?=Things to Remember:|$)'
+    ]
     
-    if explanation_start is not None:
-        explanation = " ".join(lines[explanation_start+1:])
+    for pattern in explanation_patterns:
+        match = re.search(pattern, cleaned_text, re.DOTALL | re.IGNORECASE)
+        if match:
+            explanation_text = match.group(0).strip()
+            # Remove the "The correct answer is X" part
+            explanation_text = re.sub(r'The correct answer is [A-D]\.?\s*', '', explanation_text, flags=re.IGNORECASE)
+            explanation = explanation_text.strip()
+            break
     
     # Check if question contains mathematical content
     contains_math = (
@@ -361,7 +459,7 @@ def process_pdf(file_path: str) -> Dict:
             question_blocks.append((question_text, q_id, i))
         
         # Use a small thread pool to process questions (Vercel has limited resources)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(process_question, text, q_id, idx) 
                       for text, q_id, idx in question_blocks]
             
@@ -383,7 +481,7 @@ def process_pdf(file_path: str) -> Dict:
         # Return questions and sections
         return {
             'questions': questions,
-            'sections': [{"name": name, "questions": section_data['questions']} 
+            'sections': [{"name": name, "title": section_data.get('title', ''), "questions": section_data['questions']} 
                          for name, section_data in sections.items()],
             'processing_time': time.time() - start_time,
             'total_questions': len(questions)
@@ -415,6 +513,8 @@ async def handle_pdf(file: UploadFile = File(...)):
                 timeout=55.0  # Allow 55 seconds max (within Vercel's 60s limit)
             )
         except asyncio.TimeoutError:
+            # Clean up
+            os.unlink(tmp_path)
             raise HTTPException(
                 status_code=408, 
                 detail="PDF processing timed out. Please try a smaller PDF file."
