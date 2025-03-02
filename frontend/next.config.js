@@ -1,4 +1,4 @@
-module.exports = {
+const nextConfig = {
   async rewrites() {
     return [
       {
@@ -6,5 +6,10 @@ module.exports = {
         destination: 'https://quiz-generator-pro.onrender.com/:path*'
       }
     ]
+  },
+  webpack(config) {
+    return config;
   }
 }
+
+module.exports = nextConfig;
