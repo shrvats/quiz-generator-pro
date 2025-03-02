@@ -3,7 +3,7 @@ import axios from 'axios';
 import { MathJaxContext, MathJax } from 'better-react-mathjax';
 
 // Backend URL - use environment variable or fallback to proxy path
-const BACKEND_URL = "/api/proxy";  // This should point to your render.com URL via proxy
+const BACKEND_URL = "/api/proxy";
 const MAX_TIMEOUT = 45000; // 45 seconds timeout (well under Vercel's 60s limit)
 
 // QuizRenderer component (inlined to solve import issues)
@@ -130,8 +130,7 @@ function QuizRenderer() {
     setQuizQuestions([]);
     setSelectedAnswers({});
     setShowResults(false);
-    setTimeoutWarning
-    Shown(false);
+    setTimeoutWarningShown(false);
     setAvailableSections([]);
     setSelectedSection(null);
     
@@ -813,7 +812,7 @@ function QuizRenderer() {
                 color: 'white',
                 padding: '10px 20px',
                 border: 'none',
-                borderRadius: '4px',
+                borderRadius: ''4px',
                 margin: '10px',
                 cursor: 'pointer'
               }}
