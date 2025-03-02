@@ -3,7 +3,8 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/api/proxy/:path*", "destination": "/api/proxy/[...path].js" }
+    { "source": "/api/proxy/:path*", "destination": "/api/proxy/[...path].js" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ],
   "functions": {
     "api/proxy/[...path].js": {
@@ -20,9 +21,5 @@
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
       ]
     }
-  ],
-  "routes": [
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
