@@ -17,6 +17,12 @@ function QuizRenderer() {
   const [quizMode, setQuizMode] = useState(false);
   const [quizQuestions, setQuizQuestions] = useState([]);
   const [numQuestions, setNumQuestions] = useState(10);
+  // Add in Quiz mode states (Line 20)
+  const [quizStats, setQuizStats] = useState({
+    totalQuestions: 0,
+    answerableQuestions: 0,
+    skippedQuestions: 0
+  });
   const [selectedAnswers, setSelectedAnswers] = useState({});
   const [showResults, setShowResults] = useState(false);
   const [score, setScore] = useState(0);
@@ -166,23 +172,52 @@ function QuizRenderer() {
     }));
   };
 
-  // Submit quiz and calculate score
-  const submitQuiz = () => {
-    let correctCount = 0;
+ // Replace submitQuiz function (Lines 168-180)
+const submitQuiz = () => {
+  let correctCount = 0;
+  let totalAnswerable = 0;
+  
+  quizQuestions.forEach((question, index) => {
+    if (!question.options || Object.keys(question.options).length === 0) {
+      return;
+    }
     
-    quizQuestions.forEach((question, index) => {
-      const userAnswer = selectedAnswers[index];
-      const correctAnswer = question.correct;
-      
-      if (userAnswer === correctAnswer) {
-        correctCount++;
-      }
-    });
+    totalAnswerable++;
+    const userAnswer = selectedAnswers[index];
+    const correctAnswer = question.correct;
     
-    setScore(correctCount);
-    setShowResults(true);
-  };
+    if (userAnswer === correctAnswer && userAnswer !== 'skipped') {
+      correctCount++;
+    }
+  });
+  
+  setScore(correctCount);
+  setQuizStats({
+    totalQuestions: quizQuestions.length,
+    answerableQuestions: totalAnswerable,
+    skippedQuestions: quizQuestions.length - totalAnswerable
+  });
+  setShowResults(true);
+};
 
+// Add after submitQuiz (Line 181)
+const areAllAnswerableQuestionsAnswered = () => {
+  let allAnswered = true;
+  
+  quizQuestions.forEach((question, index) => {
+    if (question.options && Object.keys(question.options).length > 0) {
+      if (!selectedAnswers[index]) {
+        allAnswered = false;
+      }
+    } else {
+      if (!selectedAnswers[index]) {
+        allAnswered = false;
+      }
+    }
+  });
+  
+  return allAnswered;
+};
   // Render configuration screen
   const renderConfigScreen = () => (
     <div style={{ backgroundColor: '#f5f5f5', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
