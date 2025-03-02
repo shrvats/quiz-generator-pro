@@ -810,3 +810,149 @@ function QuizRenderer() {
               style={{
                 backgroundColor: '#1a237e',
                 color
+                color: 'white',
+                padding: '10px 20px',
+                border: 'none',
+                borderRadius: '4px',
+                margin: '10px',
+                cursor: 'pointer'
+              }}
+            >
+              Create New Quiz
+            </button>
+            
+            <button 
+              onClick={() => {
+                setAllQuestions([]);
+                setQuizMode(false);
+                setShowResults(false);
+              }}
+              style={{
+                backgroundColor: '#f5f5f5',
+                color: '#333',
+                padding: '10px 20px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                margin: '10px',
+                cursor: 'pointer'
+              }}
+            >
+              Upload New PDF
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  // Main render function
+  return (
+    <div className="container">
+      <div style={{
+        background: backendStatus.includes('Connected') ? '#e8f5e9' : '#ffebee',
+        padding: '10px',
+        borderRadius: '4px',
+        marginBottom: '20px'
+      }}>
+        <p><strong>Backend Status:</strong> {backendStatus}</p>
+        <p><small>Using proxy to connect to backend</small></p>
+      </div>
+      
+      {/* Upload Section - Only show if not in quiz mode */}
+      {!quizMode && !allQuestions.length && (
+        <div style={{
+          marginBottom: '2rem',
+          padding: '1.5rem',
+          background: 'white',
+          borderRadius: '8px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+        }}>
+          <h2>Upload PDF</h2>
+          <p>Upload a PDF file containing quiz questions. <strong>Maximum size: 3MB</strong></p>
+          <p><small>Tips for best results:
+            <ul style={{ marginTop: '5px', fontSize: '14px', color: '#666', paddingLeft: '20px' }}>
+              <li>Use smaller PDFs (under 3MB)</li>
+              <li>Use PDFs with clear question formatting (Q.1, Q.2, etc.)</li>
+              <li>Choose PDFs with clearly marked options (A. B. C. D.)</li>
+              <li>For large PDFs, use the page range feature to process specific sections</li>
+            </ul>
+          </small></p>
+          
+          {!pdfInfo ? (
+            <input 
+              type="file" 
+              accept=".pdf" 
+              onChange={handleFile}
+              disabled={loading}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '20px',
+                background: '#f0f0f0',
+                border: '3px dashed #1a237e',
+                borderRadius: '8px',
+                margin: '20px 0',
+                cursor: loading ? 'not-allowed' : 'pointer'
+              }}
+            />
+          ) : (
+            renderPdfInfoPanel()
+          )}
+          
+          {error && (
+            <div style={{
+              color: 'red',
+              padding: '15px',
+              backgroundColor: '#ffebee',
+              borderRadius: '4px',
+              marginBottom: '20px'
+            }}>
+              <p><strong>Error:</strong> {error}</p>
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* Configuration Screen - Show after successful upload and not in quiz mode */}
+      {!quizMode && allQuestions.length > 0 && renderConfigScreen()}
+      
+      {/* Quiz Screen - Show in quiz mode */}
+      {quizMode && renderQuizQuestions()}
+    </div>
+  );
+}
+
+// Main App component (continued)
+function App() {
+  // Configure MathJax
+  const mathJaxConfig = {
+    loader: { load: ["input/asciimath", "output/chtml"] },
+    asciimath: {
+      delimiters: [
+        ["$", "$"],
+        ["`", "`"]
+      ]
+    }
+  };
+
+  return (
+    <div className="app-container">
+      <header className="app-header">
+        <h1>Quiz Generator Pro</h1>
+        <p>Upload a PDF to generate an interactive quiz from financial and mathematical content</p>
+      </header>
+      
+      <main className="app-main">
+        <MathJaxContext config={mathJaxConfig}>
+          <QuizRenderer />
+        </MathJaxContext>
+      </main>
+      
+      <footer className="app-footer">
+        <p>Quiz Generator Pro</p>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
