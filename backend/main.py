@@ -11,7 +11,6 @@ from typing import List, Dict, Optional, Tuple
 
 app = FastAPI()
 
-# CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,189 +27,162 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
-def extract_questions_from_pdf(doc, page_range=None):
-    """Extract questions and options from PDF"""
-    if page_range:
-        start_page, end_page = page_range
-        start_page = max(0, start_page)
-        end_page = min(len(doc) - 1, end_page)
-        pages = range(start_page, end_page + 1)
-    else:
-        pages = range(len(doc))
-    
-    questions = []
-    for page_num in pages:
-        page = doc[page_num]
-        text = page.get_text("text")
-        
-        # Extract question numbers and their start positions
-        question_matches = list(re.finditer(r'(?:Question|Q\.?)\s*(\d+)(?:\(Q\.(\d+)\))?|\n\s*(\d+)[\.\)]', text))
-        
-        for i, match in enumerate(question_matches):
-            # Get question ID from any matching group
-            q_id = next((g for g in match.groups() if g), "")
-            
-            # Get question text boundaries
-            start_pos = match.start()
-            if i < len(question_matches) - 1:
-                end_pos = question_matches[i+1].start()
-            else:
-                end_pos = len(text)
-            
-            # Extract full text for this question
-            question_text_block = text[start_pos:end_pos].strip()
-            
-            # Process question components
-            question_data = extract_question_components(question_text_block, q_id, page)
-            if question_data:
-                questions.append(question_data)
-    
-    # Sort questions by ID
-    questions.sort(key=lambda q: q["id"])
-    return questions
-
-def extract_question_components(text, q_id, page):
-    """Extract all components of a question"""
-    try:
-        # CRITICAL FIX: Remove any "correct answer is" statements from question text
-        clean_question = re.sub(r'The correct answer is [A-F]\..*?(?=\n|$)', '', text, flags=re.IGNORECASE)
-        clean_question = re.sub(r'(?:Correct answer|Answer)[:\s]+[A-F]\.?.*?(?=\n|$)', '', clean_question, flags=re.IGNORECASE)
-        
-        # CRITICAL FIX: Remove explanations from question text
-        for marker in ['explanation:', 'thus,', 'therefore,']:
-            marker_pos = clean_question.lower().find(marker)
-            if marker_pos > 0:
-                clean_question = clean_question[:marker_pos]
-        
-        # Extract main question text (before options)
-        main_question = extract_main_question_text(clean_question)
-        
-        # Extract options A, B, C, D
-        options = extract_options(clean_question)
-        
-        # CRITICAL FIX: Separately extract answer information
-        correct_answer = extract_correct_answer(text)
-        explanation = extract_explanation(text)
-        
-        # CRITICAL FIX: Extract "Choice X is incorrect" type tables separately
-        correct_option_data = extract_option_evaluation(text)
-        
-        return {
-            "id": int(q_id) if q_id.isdigit() else 0,
-            "question": main_question,
-            "options": options,
-            "correct": correct_answer,
-            "explanation": explanation,
-            "option_evaluations": correct_option_data,  # CRITICAL FIX: Store option evaluations separately
-            "has_table": False  # We're not handling tables in this simplified version
-        }
-    except Exception as e:
-        print(f"Error processing question {q_id}: {str(e)}")
-        return None
-
-def extract_main_question_text(text):
-    """Extract only the question text, removing options and explanations"""
-    # Find where options begin
-    option_match = re.search(r'\n\s*[A-F][\.\)]', text)
-    if option_match:
-        # Cut off at first option
-        return text[:option_match.start()].strip()
-    return text.strip()
-
-def extract_options(text):
-    """Extract options A, B, C, D, etc. from text"""
-    options = {}
-    
-    # Match each option with its text
-    option_pattern = r'(?:^|\n)\s*([A-F])[\.\)]\s*(.*?)(?=\n\s*[A-F][\.\)]|\Z)'
-    option_matches = re.finditer(option_pattern, text, re.DOTALL)
-    
-    for match in option_matches:
-        letter = match.group(1)
-        option_text = match.group(2).strip()
-        
-        # CRITICAL FIX: Remove any indication of correct/incorrect from options
-        option_text = re.sub(r'(?:is correct|correct answer|is incorrect)', '', option_text, flags=re.IGNORECASE)
-        
-        options[letter] = option_text
-    
-    return options
-
-def extract_correct_answer(text):
-    """Extract the letter (A-F) of the correct answer"""
-    patterns = [
-        r'(?:The correct answer is|Correct answer[:\s]+)([A-F])\.?',
-        r'The answer is ([A-F])\.?',
-        r'Answer:\s*([A-F])\.?'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def extract_explanation(text):
-    """Extract explanation text that should be shown after user answers"""
-    explanation = ""
-    
-    # Look for explanation after the correct answer statement
-    exp_match = re.search(r'(?:The correct answer is|Correct answer[:\s]+)[A-F]\.?\s*(.*?)(?=\n\s*(?:Things to remember:|Note:)|\Z)', 
-                         text, re.DOTALL | re.IGNORECASE)
-    if exp_match:
-        explanation = exp_match.group(1).strip()
-    
-    # If no explanation found after correct answer, look for explicit explanation section
-    if not explanation:
-        exp_match = re.search(r'Explanation:\s*(.*?)(?=\n\s*(?:Things to remember:|Note:)|\Z)',
-                             text, re.DOTALL | re.IGNORECASE)
-        if exp_match:
-            explanation = exp_match.group(1).strip()
-    
-    return explanation
-
-def extract_option_evaluation(text):
-    """Extract 'Choice X is incorrect/correct' evaluations from text"""
-    evaluations = {}
-    
-    # Find evaluation table rows
-    eval_pattern = r'(?:Choice|Option)\s+([A-F])\s+is\s+(in)?correct\.\s*(.*?)(?=\n\s*(?:Choice|Option)|$)'
-    eval_matches = re.finditer(eval_pattern, text, re.DOTALL | re.IGNORECASE)
-    
-    for match in eval_matches:
-        option = match.group(1)
-        is_correct = match.group(2) is None  # If "in" is not present, it's correct
-        explanation = match.group(3).strip()
-        
-        evaluations[option] = {
-            "is_correct": is_correct,
-            "explanation": explanation
-        }
-    
-    return evaluations
-
 def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict:
-    """Process PDF to extract quiz questions and answers"""
-    start_time = time.time()
-    
+    """Simplified PDF processing function to extract quiz data"""
     try:
         doc = fitz.open(file_path)
         total_pages = len(doc)
         
-        questions = extract_questions_from_pdf(doc, page_range)
+        # Adjust page range if provided
+        if page_range:
+            start_page, end_page = page_range
+            start_page = max(0, start_page)
+            end_page = min(len(doc) - 1, end_page)
+            page_iterator = range(start_page, end_page + 1)
+        else:
+            page_iterator = range(len(doc))
+        
+        # Extract all text from PDF first
+        all_text = ""
+        for page_num in page_iterator:
+            page = doc[page_num]
+            all_text += page.get_text("text") + "\n"
+        
+        # Find all questions in the text
+        questions = []
+        
+        # Match Q.XXXX or Question X patterns
+        question_pattern = r'(?:Q\.?\s*(\d+)(?:\(Q\.(\d+)\))?|Question\s+(\d+)(?:\(Q\.(\d+)\))?)'
+        
+        # Find all question matches
+        question_matches = list(re.finditer(question_pattern, all_text))
+        
+        for i, match in enumerate(question_matches):
+            # Get question ID
+            q_num = None
+            for group in match.groups():
+                if group:
+                    q_num = group
+                    break
+            
+            if not q_num:
+                continue
+                
+            # Calculate text boundaries for this question
+            start_pos = match.start()
+            if i < len(question_matches) - 1:
+                end_pos = question_matches[i+1].start()
+            else:
+                end_pos = len(all_text)
+            
+            question_text = all_text[start_pos:end_pos].strip()
+            
+            # Extract options for this question
+            options = {}
+            
+            # Look for A., B., C., D. options
+            option_pattern = r'(?:^|\n)\s*([A-F])[\.\)]\s*(.*?)(?=\n\s*[A-F][\.\)]|\n\s*$|$)'
+            option_matches = list(re.finditer(option_pattern, question_text, re.DOTALL))
+            
+            for opt_match in option_matches:
+                letter = opt_match.group(1)
+                option_text = opt_match.group(2).strip()
+                
+                # Clean the option text (remove any "correct" markers)
+                option_text = re.sub(r'(?:is correct|correct answer|is incorrect)', '', option_text, flags=re.IGNORECASE)
+                
+                options[letter] = option_text
+            
+            # Extract correct answer if present
+            correct_answer = None
+            answer_patterns = [
+                r'(?:The correct answer is|Correct answer[:\s]+)([A-F])\.?',
+                r'The answer is ([A-F])\.?',
+                r'Answer:\s*([A-F])\.?'
+            ]
+            
+            for pattern in answer_patterns:
+                answer_match = re.search(pattern, question_text, re.IGNORECASE)
+                if answer_match:
+                    correct_answer = answer_match.group(1)
+                    break
+            
+            # Extract ONLY the actual question text (not options or answers)
+            actual_question = extract_question_only(question_text)
+            
+            # For questions with numbers in them, extract those separately
+            numeric_value = extract_numeric_value(question_text)
+            
+            # Create the question object
+            q_obj = {
+                "id": int(q_num),
+                "question": actual_question,
+                "options": options,
+                "numeric_value": numeric_value,
+                "correct": correct_answer,
+                "explanation": extract_explanation(question_text),
+                "has_options": len(options) > 0
+            }
+            
+            questions.append(q_obj)
+        
+        # Sort questions by ID
+        questions.sort(key=lambda q: q["id"])
         
         return {
             "questions": questions,
             "total_questions": len(questions),
-            "total_pages": total_pages,
-            "processing_time": time.time() - start_time
+            "total_pages": total_pages
         }
     
     except Exception as e:
         print(f"Error in PDF processing: {str(e)}")
         traceback.print_exc()
         return {"error": f"Failed to process PDF: {str(e)}", "questions": [], "total_pages": 0}
+
+def extract_question_only(text):
+    """Extract only the question text without options or answers"""
+    # Remove any "The correct answer is..." text
+    text = re.sub(r'The correct answer is [A-F]\..*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:Correct answer|Answer)[:\s]+[A-F]\.?.*', '', text, flags=re.IGNORECASE)
+    
+    # Cut off at first option
+    option_match = re.search(r'\n\s*[A-F][\.\)]', text)
+    if option_match:
+        text = text[:option_match.start()]
+    
+    # Remove the question ID
+    text = re.sub(r'^(?:Q\.?\s*\d+(?:\(Q\.\d+\))?|Question\s+\d+(?:\(Q\.\d+\))?)\s*', '', text)
+    
+    return text.strip()
+
+def extract_numeric_value(text):
+    """Extract any numeric values from question like 37.00 or 39.00 F 50,000"""
+    # Look for patterns like "37.00" or "39.00 F 50,000"
+    patterns = [
+        r'(\d+\.\d+)\s+([A-Z])\s+([\d,]+)',  # For patterns like "39.00 F 50,000"
+        r'(\d+\.\d+)\s*([A-Z])?\s*([\d,]*)',  # More general pattern
+        r'(\d+\.\d+)'  # Just a number
+    ]
+    
+    for pattern in patterns:
+        num_match = re.search(pattern, text)
+        if num_match:
+            return num_match.group(0).strip()
+    
+    return None
+
+def extract_explanation(text):
+    """Extract explanation text"""
+    explanation = ""
+    
+    # Look for explanation after correct answer
+    exp_match = re.search(r'(?:The correct answer is|Correct answer[:\s]+)[A-F]\.?\s*(.*?)(?=$)', 
+                         text, re.DOTALL | re.IGNORECASE)
+    if exp_match:
+        explanation = exp_match.group(1).strip()
+    
+    return explanation
 
 @app.post("/process")
 async def handle_pdf(
