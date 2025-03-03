@@ -18,3 +18,4 @@ tabula-py>=2.5.0
 sentence-transformers>=2.2.0
 pgvector>=0.1.8
 psycopg>=3.1.8
+asyncpg>=0.27.0
