@@ -21,7 +21,7 @@ D is incorrect. Creating a subsidiary to hold critical assets like intellectual 
 
 Things to Remember
 A poison pill, or shareholder rights plan, is a defensive strategy used by corporations to deter hostile takeovers by diluting the shares held by potential acquirers, making a takeover less attractive or more costly.
-Examples of poison pills include issuing new shares to existing shareholders at a discount, allowing shareholders except the acquirer to buy more shares at a discount, or creating new classes of shares that increase voting rights for existing shareholders upon a trigger event.
+Examples include issuing new shares to existing shareholders at a discount, allowing shareholders (except the acquirer) to buy more shares at a discount, or creating new classes of shares that increase voting rights for existing shareholders upon a trigger event.
 In 2012, Netflix adopted a poison pill after activist investor Carl Icahn acquired a significant stake. This plan was designed to be triggered if an individual or group acquired 10% (or 20% for institutional investors) of Netflix's shares, effectively preventing a hostile takeover without board approval.
 ------------------------------------------------
 
@@ -534,7 +534,7 @@ class PDFQuestionExtractor:
         self.stats.options_found += len(options)
         text, correct_answer = self.cleaner.remove_answer_from_text(text)
         text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', text)
-        # APPENDED CHANGE: Updated _extract_things_to_remember to capture everything after the header if present.
+        # APPENDED CHANGE: Extract "Things to Remember" section (if present) and remove it from the question text
         text, things_to_remember = self._extract_things_to_remember(text)
         text, explanation = self._extract_explanation(text)
         bidder_data = self._extract_bidder_data(text)
@@ -673,7 +673,7 @@ class PDFQuestionExtractor:
     
     def _extract_things_to_remember(self, text: str) -> Tuple[str, str]:
         """Extract 'Things to Remember' section from text.
-           APPENDED CHANGE: Capture header with optional colon and all text until end-of-text.
+           APPENDED CHANGE: Capture header with optional colon and all text until the end.
         """
         things_to_remember = ""
         pattern = r'Things to Remember[:\s]*\n(.+)$'
@@ -682,7 +682,6 @@ class PDFQuestionExtractor:
             things_to_remember = match.group(1).strip()
             text = text[:match.start()].strip()
         else:
-            # Fallback to previous patterns if needed
             patterns = [
                 r'Things to Remember[:\s]+(.*?)(?=\n\n|\Z)',
                 r'Remember[:\s]+(.*?)(?=\n\n|\Z)',
@@ -1218,17 +1217,4 @@ def test_edge_cases():
             result["details"]["expected_options"] = case["expected_options"]
             result["details"]["actual_options"] = list(question.options.keys())
             result["passed"] = all(opt in question.options for opt in case["expected_options"])
-        if "expected_bidders" in case:
-            result["details"]["expected_bidders"] = case["expected_bidders"]
-            result["details"]["actual_bidders"] = len(question.bidder_data)
-            result["passed"] = len(question.bidder_data) == case["expected_bidders"]
-        if "expected_issues" in case:
-            result["details"]["expected_issues"] = case["expected_issues"]
-            result["details"]["actual_issues"] = question.validation_issues
-            result["passed"] = all(issue in question.validation_issues for issue in case["expected_issues"])
-        results.append(result)
-    return results
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+       
