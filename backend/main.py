@@ -1713,6 +1713,12 @@ async def get_processing_status(request_id: str):
     if not status:
         raise HTTPException(status_code=404, detail=f"No status found for request ID {request_id}")
     return status
+    
+@app.head("/")
+     def head_root():
+    # Return an empty response with a 200 status code
+      return {}
+
 
 @app.post("/pdf-info")
 async def get_pdf_info(file: UploadFile = File(...)):
