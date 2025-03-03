@@ -24,17 +24,25 @@ from concurrent.futures import ThreadPoolExecutor
 import fitz  # PyMuPDF
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form, BackgroundTasks, Depends, status
+from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form, BackgroundTasks, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
 # Optional OCR support
 try:
     import pytesseract
+    import cv2
     from PIL import Image
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+# Optional tabula support
+try:
+    import tabula
+    TABULA_AVAILABLE = True
+except ImportError:
+    TABULA_AVAILABLE = False
 
 # Setup logging
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -52,6 +60,7 @@ DEFAULT_TIMEOUT = 55  # seconds
 MIN_QUESTION_LENGTH = 10
 MAX_PDF_SIZE_MB = 100
 CACHE_EXPIRY = 3600
+ENABLE_VECTOR_DB = os.environ.get("ENABLE_VECTOR_DB", "true").lower() == "true"
 
 ###############################
 # Data Models and Structures  #
@@ -236,6 +245,11 @@ class QuizSubmission(BaseModel):
     question_id: int
     selected_answer: str
 
+class SimilarQuestionResponse(BaseModel):
+    questions: List[Dict[str, Any]]
+    total: int
+    query: str
+
 ###################################
 #     PDF Processing Core         #
 ###################################
@@ -280,6 +294,88 @@ class MathExtractor:
         
         return expressions
 
+class EnhancedOCRProcessor:
+    """Enhanced OCR processing with image preprocessing"""
+    
+    def __init__(self):
+        self.tesseract_config = r'--oem 3 --psm 6 -l eng+equ --dpi 300'
+        self.is_available = OCR_AVAILABLE
+    
+    def preprocess_image(self, img):
+        """Apply preprocessing to improve OCR results"""
+        if not OCR_AVAILABLE:
+            return img
+            
+        # Convert to grayscale
+        gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        
+        # Apply thresholding to remove noise
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        
+        # Deskew if needed
+        coords = np.column_stack(np.where(thresh > 0))
+        angle = cv2.minAreaRect(coords)[-1]
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+            
+        # Rotate the image to deskew
+        if abs(angle) > 0.5:
+            (h, w) = thresh.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated = cv2.warpAffine(thresh, M, (w, h), flags=cv2.INTER_CUBIC, 
+                                     borderMode=cv2.BORDER_REPLICATE)
+            return Image.fromarray(rotated)
+            
+        return Image.fromarray(thresh)
+    
+    def process_page(self, page, dpi=300):
+        """Process a page with enhanced OCR"""
+        if not OCR_AVAILABLE:
+            return ""
+        
+        try:
+            # Convert page to image with higher resolution
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Preprocess the image
+            preprocessed = self.preprocess_image(img)
+            
+            # Run OCR with advanced configuration
+            text = pytesseract.image_to_string(preprocessed, config=self.tesseract_config)
+            
+            # Post-process the text (remove stray marks, fix common OCR errors)
+            text = self._post_process_text(text)
+            return text
+        except Exception as e:
+            logger.error(f"Enhanced OCR processing error: {str(e)}")
+            return ""
+    
+    def _post_process_text(self, text):
+        """Clean up OCR results"""
+        # Replace common OCR errors
+        replacements = {
+            'l\n': '1\n',
+            '0\n': 'O\n',
+            'S\n': '5\n',
+            'l.': '1.',
+            '0.': 'O.',
+        }
+        
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+            
+        # Remove stray marks and non-text elements
+        text = re.sub(r'[^\x00-\x7F]+', '', text)
+        
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text
+
 class OCRProcessor:
     """Processes images to extract text using OCR"""
     
@@ -294,17 +390,24 @@ class OCRProcessor:
             return ""
         
         try:
-            # Convert page to image with higher resolution for better OCR
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            
-            # Use custom OCR configuration for better results
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
-            return text
+            # Use enhanced OCR processor if available
+            enhanced_processor = EnhancedOCRProcessor()
+            return enhanced_processor.process_page(page)
         except Exception as e:
             logger.error(f"OCR processing error: {str(e)}")
-            return ""
+            
+            # Fallback to basic OCR if enhanced fails
+            try:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                
+                # Use custom OCR configuration for better results
+                custom_config = r'--oem 3 --psm 6'
+                text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
+                return text
+            except Exception as e2:
+                logger.error(f"Basic OCR processing error: {str(e2)}")
+                return ""
     
     @staticmethod
     def process_region(page, bbox) -> str:
@@ -318,8 +421,11 @@ class OCRProcessor:
             pix = page.get_pixmap(matrix=mat, clip=clip)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
+            # Try enhanced OCR first
+            enhanced_processor = EnhancedOCRProcessor()
+            preprocessed = enhanced_processor.preprocess_image(img)
+            text = pytesseract.image_to_string(preprocessed, config=enhanced_processor.tesseract_config)
+            
             return text
         except Exception as e:
             logger.error(f"OCR region processing error: {str(e)}")
@@ -464,48 +570,102 @@ class PDFTextCleaner:
         
         return text, explanation
 
-class TableExtractor:
-    """Extracts and formats tables from PDFs"""
+class EnhancedTableExtractor:
+    """Enhanced table extraction using tabula-py and heuristics"""
     
-    @staticmethod
-    def detect_tables(doc, page_idx) -> List[Tuple[float, float, float, float]]:
-        """Detect potential table regions on a page"""
+    def __init__(self):
+        self.tabula_available = TABULA_AVAILABLE
+    
+    def detect_tables(self, doc, page_idx):
+        """Detect tables using multiple methods"""
+        page = doc[page_idx]
+        table_regions = []
+        
+        # Method 1: Use PyMuPDF built-in detection
         try:
-            page = doc[page_idx]
-            
-            # Look for patterns that could indicate tables:
-            # 1. Multiple horizontal lines close together
-            # 2. Text arranged in grid-like patterns
-            
-            # Get the text blocks
-            blocks = page.get_text("dict")["blocks"]
-            
-            table_regions = []
-            for i, block in enumerate(blocks):
-                # Check if the block might be a table
-                if "lines" in block and len(block.get("lines", [])) >= 3:
-                    # Check for grid-like pattern of text
-                    spans_by_line = []
-                    for line in block["lines"]:
-                        if "spans" in line:
-                            spans_by_line.append(len(line["spans"]))
-                    
-                    # If there are multiple lines with multiple spans, might be a table
-                    if len(spans_by_line) >= 3 and sum(spans_by_line) >= 6:
-                        table_regions.append(block["bbox"])
-            
-            return table_regions
+            tables = page.find_tables()
+            if tables and tables.tables:
+                for table in tables.tables:
+                    table_regions.append(table.rect)
         except Exception as e:
-            logger.error(f"Table detection error: {str(e)}")
-            return []
+            logger.debug(f"PyMuPDF table detection error: {str(e)}")
+        
+        # Method 2: Look for grid patterns in text blocks (backup method)
+        if not table_regions:
+            try:
+                blocks = page.get_text("dict")["blocks"]
+                for block in blocks:
+                    if "lines" in block and len(block.get("lines", [])) >= 3:
+                        spans_by_line = []
+                        for line in block["lines"]:
+                            if "spans" in line:
+                                spans_by_line.append(len(line["spans"]))
+                        
+                        # If multiple lines with multiple spans, might be a table
+                        if len(spans_by_line) >= 3 and sum(spans_by_line) >= 6:
+                            table_regions.append(block["bbox"])
+            except Exception as e:
+                logger.debug(f"Text-based table detection error: {str(e)}")
+        
+        return table_regions
     
-    @staticmethod
-    def extract_table(doc, page_idx, bbox) -> str:
-        """Extract table content as HTML"""
+    def extract_table(self, doc, page_idx, table_rect):
+        """Extract table using tabula or fallback to manual extraction"""
+        if self.tabula_available:
+            try:
+                # Save page to a temporary PDF
+                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+                    tmp_path = tmp.name
+                
+                # Extract just the page with the table
+                new_doc = fitz.open()
+                new_doc.insert_pdf(doc, from_page=page_idx, to_page=page_idx)
+                new_doc.save(tmp_path)
+                new_doc.close()
+                
+                # Calculate relative coordinates (tabula uses top-left origin)
+                page = doc[page_idx]
+                page_height = page.rect.height
+                
+                # Convert from PyMuPDF to tabula coordinates (relative to page)
+                area = [
+                    table_rect[1] / page_height * 100,            # top
+                    table_rect[0] / page.rect.width * 100,        # left
+                    table_rect[3] / page_height * 100,            # bottom
+                    table_rect[2] / page.rect.width * 100         # right
+                ]
+                
+                # Use tabula to extract the table
+                tables = tabula.read_pdf(
+                    tmp_path, 
+                    pages=1,  # Just the extracted page
+                    area=area,
+                    multiple_tables=False,
+                    pandas_options={'header': None}
+                )
+                
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+                
+                if tables and len(tables) > 0:
+                    df = tables[0]
+                    # Convert to HTML
+                    html = df.to_html(index=False, classes='quiz-table', na_rep='')
+                    return html
+            
+            except Exception as e:
+                logger.error(f"Tabula extraction error: {str(e)}")
+        
+        # Fallback to manual extraction
+        return self._extract_table_manually(doc, page_idx, table_rect)
+    
+    def _extract_table_manually(self, doc, page_idx, bbox):
+        """Manual table extraction as fallback"""
         try:
             page = doc[page_idx]
-            
-            # Get text from the table region
             table_text = page.get_text("dict", clip=bbox)
             
             # Extract rows based on vertical position
@@ -521,14 +681,26 @@ class TableExtractor:
                             continue
                         
                         y_pos = round(line["bbox"][1])  # y0 coordinate
-                        spans = []
+                        
+                        # Group spans by x-position to form cells
+                        spans_by_x = {}
                         for span in line["spans"]:
                             if "text" in span and span["text"].strip():
-                                spans.append(span["text"])
+                                # Round x position to group nearby values
+                                x_pos = round(span["bbox"][0] / 10) * 10
+                                if x_pos not in spans_by_x:
+                                    spans_by_x[x_pos] = []
+                                spans_by_x[x_pos].append(span["text"])
                         
-                        # Add text to the corresponding row
-                        if spans:
-                            rows_by_y[y_pos].extend(spans)
+                        # Sort by x position and add to row
+                        x_positions = sorted(spans_by_x.keys())
+                        row_cells = []
+                        for x_pos in x_positions:
+                            cell_text = " ".join(spans_by_x[x_pos])
+                            row_cells.append(cell_text)
+                        
+                        if row_cells:
+                            rows_by_y[y_pos] = row_cells
             
             # Sort rows by vertical position
             sorted_y = sorted(rows_by_y.keys())
@@ -538,15 +710,24 @@ class TableExtractor:
             if not rows:
                 return ""
             
+            # Determine table structure by analyzing column counts
+            col_counts = [len(row) for row in rows]
+            if not col_counts:
+                return ""
+                
+            # Use the most common column count as our standard
+            target_cols = max(set(col_counts), key=col_counts.count)
+            
             # Check if first row might be headers
             headers = []
-            if rows:
-                first_row = rows[0]
-                if len(first_row) >= 2:
-                    # First row could be headers if it differs from others
-                    headers = first_row
-                    rows = rows[1:]
+            data_rows = rows
+            if len(rows) > 1:
+                # Heuristic: First row is often header if it's bold or has different formatting
+                if len(rows[0]) <= target_cols:
+                    headers = rows[0]
+                    data_rows = rows[1:]
             
+            # Generate HTML
             html = ["<table class='quiz-table' border='1'>"]
             
             # Add headers if found
@@ -560,8 +741,14 @@ class TableExtractor:
             
             # Add data rows
             html.append("<tbody>")
-            for row in rows:
+            for row in data_rows:
                 html.append("<tr>")
+                # Normalize row to target column count
+                if len(row) < target_cols:
+                    row = row + [""] * (target_cols - len(row))
+                elif len(row) > target_cols:
+                    row = row[:target_cols]
+                    
                 for cell in row:
                     # Check if cell might be numeric for alignment
                     align = " class='numeric'" if re.match(r'^[\d\.\$]+$', cell) else ""
@@ -573,8 +760,136 @@ class TableExtractor:
             return "\n".join(html)
         
         except Exception as e:
-            logger.error(f"Table extraction error: {str(e)}")
+            logger.error(f"Manual table extraction error: {str(e)}")
             return ""
+
+class TableExtractor:
+    """Extracts and formats tables from PDFs"""
+    
+    @staticmethod
+    def detect_tables(doc, page_idx) -> List[Tuple[float, float, float, float]]:
+        """Detect potential table regions on a page"""
+        try:
+            # Use enhanced table extractor
+            enhanced_extractor = EnhancedTableExtractor()
+            return enhanced_extractor.detect_tables(doc, page_idx)
+        except Exception as e:
+            logger.error(f"Enhanced table detection error: {str(e)}")
+            
+            # Fallback to basic detection
+            try:
+                page = doc[page_idx]
+                
+                # Look for patterns that could indicate tables:
+                # 1. Multiple horizontal lines close together
+                # 2. Text arranged in grid-like patterns
+                
+                # Get the text blocks
+                blocks = page.get_text("dict")["blocks"]
+                
+                table_regions = []
+                for i, block in enumerate(blocks):
+                    # Check if the block might be a table
+                    if "lines" in block and len(block.get("lines", [])) >= 3:
+                        # Check for grid-like pattern of text
+                        spans_by_line = []
+                        for line in block["lines"]:
+                            if "spans" in line:
+                                spans_by_line.append(len(line["spans"]))
+                        
+                        # If there are multiple lines with multiple spans, might be a table
+                        if len(spans_by_line) >= 3 and sum(spans_by_line) >= 6:
+                            table_regions.append(block["bbox"])
+                
+                return table_regions
+            except Exception as e:
+                logger.error(f"Table detection error: {str(e)}")
+                return []
+    
+    @staticmethod
+    def extract_table(doc, page_idx, bbox) -> str:
+        """Extract table content as HTML"""
+        try:
+            # Use enhanced table extractor
+            enhanced_extractor = EnhancedTableExtractor()
+            return enhanced_extractor.extract_table(doc, page_idx, bbox)
+        except Exception as e:
+            logger.error(f"Enhanced table extraction error: {str(e)}")
+            
+            # Fallback to basic extraction
+            try:
+                page = doc[page_idx]
+                
+                # Get text from the table region
+                table_text = page.get_text("dict", clip=bbox)
+                
+                # Extract rows based on vertical position
+                rows_by_y = defaultdict(list)
+                
+                if "blocks" in table_text:
+                    for block in table_text["blocks"]:
+                        if "lines" not in block:
+                            continue
+                        
+                        for line in block["lines"]:
+                            if "spans" not in line:
+                                continue
+                            
+                            y_pos = round(line["bbox"][1])  # y0 coordinate
+                            spans = []
+                            for span in line["spans"]:
+                                if "text" in span and span["text"].strip():
+                                    spans.append(span["text"])
+                            
+                            # Add text to the corresponding row
+                            if spans:
+                                rows_by_y[y_pos].extend(spans)
+                
+                # Sort rows by vertical position
+                sorted_y = sorted(rows_by_y.keys())
+                rows = [rows_by_y[y] for y in sorted_y]
+                
+                # Generate HTML table
+                if not rows:
+                    return ""
+                
+                # Check if first row might be headers
+                headers = []
+                if rows:
+                    first_row = rows[0]
+                    if len(first_row) >= 2:
+                        # First row could be headers if it differs from others
+                        headers = first_row
+                        rows = rows[1:]
+                
+                html = ["<table class='quiz-table' border='1'>"]
+                
+                # Add headers if found
+                if headers:
+                    html.append("<thead>")
+                    html.append("<tr>")
+                    for header in headers:
+                        html.append(f"<th>{header}</th>")
+                    html.append("</tr>")
+                    html.append("</thead>")
+                
+                # Add data rows
+                html.append("<tbody>")
+                for row in rows:
+                    html.append("<tr>")
+                    for cell in row:
+                        # Check if cell might be numeric for alignment
+                        align = " class='numeric'" if re.match(r'^[\d\.\$]+$', cell) else ""
+                        html.append(f"<td{align}>{cell}</td>")
+                    html.append("</tr>")
+                html.append("</tbody>")
+                html.append("</table>")
+                
+                return "\n".join(html)
+            
+            except Exception as e:
+                logger.error(f"Table extraction error: {str(e)}")
+                return ""
 
 class PDFQuestionExtractor:
     """Extracts quiz questions from PDF documents"""
@@ -851,6 +1166,224 @@ class PDFQuestionExtractor:
         
         return any(table_indicators)
 
+class VectorDatabase:
+    """Vector database for quiz questions with similarity search"""
+    
+    def __init__(self, connection_string=None):
+        self.connection_string = connection_string or os.environ.get(
+            "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/quizdb"
+        )
+        self.embedding_model = None
+        self.conn = None
+        self.initialized = False
+    
+    async def initialize(self):
+        """Initialize the database connection and embeddings model"""
+        if self.initialized:
+            return
+            
+        try:
+            # Initialize embedding model
+            from sentence_transformers import SentenceTransformer
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            
+            # Initialize postgres connection with pgvector
+            import psycopg
+            import pgvector.psycopg
+            
+            self.conn = await psycopg.AsyncConnection.connect(
+                self.connection_string, autocommit=True
+            )
+            
+            # Create tables if they don't exist
+            await self._create_tables()
+            self.initialized = True
+            logger.info("Vector database initialized successfully")
+        except ImportError as e:
+            logger.error(f"Missing dependencies for vector database: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to initialize vector database: {str(e)}")
+    
+    async def _create_tables(self):
+        """Create necessary tables and extensions"""
+        async with self.conn.cursor() as cur:
+            # Create pgvector extension if not exists
+            await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            
+            # Create questions table
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS questions (
+                    id SERIAL PRIMARY KEY,
+                    question_id TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    options JSONB,
+                    correct_answer TEXT,
+                    explanation TEXT,
+                    embedding vector(384),
+                    metadata JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create index on embedding for similarity search
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS questions_embedding_idx 
+                ON questions USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+            """)
+            
+            # Create files table to track processed files
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    id SERIAL PRIMARY KEY,
+                    file_hash TEXT UNIQUE NOT NULL,
+                    filename TEXT NOT NULL,
+                    total_pages INTEGER NOT NULL,
+                    total_questions INTEGER NOT NULL,
+                    metadata JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+    
+    def compute_embedding(self, text):
+        """Generate embeddings for text"""
+        if not self.embedding_model:
+            return None
+        
+        # Clean the text first
+        clean_text = ' '.join(text.split())
+        return self.embedding_model.encode(clean_text).tolist()
+    
+    async def store_questions(self, questions, file_hash, filename, metadata=None):
+        """Store questions in vector database"""
+        if not self.initialized:
+            await self.initialize()
+            
+        if not self.initialized:
+            logger.error("Vector database not initialized, cannot store questions")
+            return False
+            
+        try:
+            # First store file record
+            async with self.conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO files (file_hash, filename, total_pages, total_questions, metadata)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (file_hash) DO UPDATE
+                    SET total_questions = %s, metadata = %s
+                    RETURNING id
+                    """,
+                    (
+                        file_hash, 
+                        filename, 
+                        metadata.get('total_pages', 0) if metadata else 0,
+                        len(questions),
+                        json.dumps(metadata) if metadata else '{}',
+                        len(questions),
+                        json.dumps(metadata) if metadata else '{}'
+                    )
+                )
+                
+                file_id = await cur.fetchone()
+                
+                # Then store each question with its embedding
+                for question in questions:
+                    # Generate embedding for the question text
+                    q_text = question.text
+                    embedding = self.compute_embedding(q_text)
+                    
+                    # Store in database
+                    await cur.execute(
+                        """
+                        INSERT INTO questions 
+                        (question_id, file_hash, text, options, correct_answer, explanation, embedding, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            str(question.id),
+                            file_hash,
+                            q_text,
+                            json.dumps(question.options),
+                            question.correct_answer,
+                            question.explanation,
+                            embedding,
+                            json.dumps({
+                                'has_math': question.has_math,
+                                'has_table': question.has_table,
+                                'math_expressions': question.math_expressions
+                            })
+                        )
+                    )
+                
+            logger.info(f"Stored {len(questions)} questions in vector database for file {filename}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error storing questions in vector database: {str(e)}")
+            return False
+    
+    async def find_similar_questions(self, query_text, limit=5):
+        """Find similar questions to the given query"""
+        if not self.initialized:
+            await self.initialize()
+            
+        if not self.initialized:
+            logger.error("Vector database not initialized, cannot search questions")
+            return []
+            
+        try:
+            # Generate embedding for query
+            query_embedding = self.compute_embedding(query_text)
+            
+            # Search for similar questions
+            async with self.conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT 
+                        id, 
+                        question_id, 
+                        text, 
+                        options, 
+                        correct_answer, 
+                        explanation,
+                        1 - (embedding <=> %s) as similarity
+                    FROM questions
+                    ORDER BY embedding <=> %s
+                    LIMIT %s
+                    """,
+                    (query_embedding, query_embedding, limit)
+                )
+                
+                results = await cur.fetchall()
+                
+                # Format results
+                similar_questions = []
+                for row in results:
+                    similar_questions.append({
+                        'id': row[0],
+                        'question_id': row[1],
+                        'text': row[2],
+                        'options': json.loads(row[3]),
+                        'correct_answer': row[4],
+                        'explanation': row[5],
+                        'similarity': row[6]
+                    })
+                
+                return similar_questions
+        
+        except Exception as e:
+            logger.error(f"Error searching for similar questions: {str(e)}")
+            return []
+    
+    async def close(self):
+        """Close database connection"""
+        if self.conn:
+            await self.conn.close()
+            self.conn = None
+            self.initialized = False
+
 class PDFProcessor:
     """Main class for processing PDF files to extract quiz questions"""
     
@@ -908,6 +1441,17 @@ app.add_middleware(
 # Store processing status
 processing_status = {}
 
+# Create vector DB instance
+vector_db = VectorDatabase() if ENABLE_VECTOR_DB else None
+
+# Add dependency for vector DB access
+async def get_vector_db():
+    if vector_db:
+        if not vector_db.initialized:
+            await vector_db.initialize()
+        return vector_db
+    return None
+
 def update_processing_status(request_id: str, status: str, progress: float, message: str):
     """Update the processing status for a request"""
     processing_status[request_id] = {
@@ -924,6 +1468,87 @@ def update_processing_status(request_id: str, status: str, progress: float, mess
                      if current_time - v["timestamp"] > CACHE_EXPIRY]
     for key in keys_to_remove:
         processing_status.pop(key, None)
+
+async def process_pdf_with_storage(
+    file_path, 
+    request_id, 
+    page_range, 
+    file_hash, 
+    filename, 
+    store_in_db=True,
+    vector_db=None
+):
+    """Process PDF and optionally store in vector database"""
+    try:
+        update_processing_status(request_id, "processing", 0.1, "Starting PDF processing")
+        processor = PDFProcessor(file_path, page_range)
+        
+        with ThreadPoolExecutor() as executor:
+            result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
+        
+        # Store in vector database if enabled and requested
+        if store_in_db and vector_db and result.get('questions'):
+            try:
+                # Convert dict questions back to QuestionData objects
+                questions = []
+                for q_dict in result.get('questions', []):
+                    question = QuestionData(
+                        id=q_dict.get('id'),
+                        text=q_dict.get('question', ''),
+                        options=q_dict.get('options', {}),
+                        correct_answer=q_dict.get('correct'),
+                        explanation=q_dict.get('explanation', ''),
+                        has_table=q_dict.get('has_table', False),
+                        has_math=q_dict.get('contains_math', False),
+                        math_expressions=q_dict.get('math_expressions', [])
+                    )
+                    questions.append(question)
+                
+                # Store in DB
+                metadata = {
+                    'total_pages': result.get('total_pages', 0),
+                    'stats': result.get('stats', {})
+                }
+                
+                success = await vector_db.store_questions(
+                    questions, 
+                    file_hash, 
+                    filename, 
+                    metadata
+                )
+                
+                if success:
+                    result['stored_in_db'] = True
+                    logger.info(f"Stored {len(questions)} questions in vector database")
+                else:
+                    result['stored_in_db'] = False
+                    logger.warning("Failed to store questions in vector database")
+            
+            except Exception as e:
+                logger.error(f"Error storing in vector database: {str(e)}")
+                result['stored_in_db'] = False
+        
+        update_processing_status(
+            request_id, 
+            "completed", 
+            1.0, 
+            f"Completed processing. Found {result.get('total_questions', 0)} questions"
+        )
+        return result
+    
+    except Exception as e:
+        update_processing_status(request_id, "error", 0, f"Error: {str(e)}")
+        logger.error(f"Error in background processing: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {"error": str(e), "questions": [], "total_pages": 0}
+    
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(file_path):
+                os.unlink(file_path)
+        except Exception as e:
+            logger.error(f"Error cleaning up temp file: {str(e)}")
 
 async def process_pdf_task(file_path: str, request_id: str, page_range=None):
     """Background task for PDF processing"""
@@ -962,7 +1587,9 @@ async def handle_pdf(
     file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    async_process: bool = Form(False)
+    async_process: bool = Form(False),
+    store_in_db: bool = Form(True),
+    vector_db: Optional[VectorDatabase] = Depends(get_vector_db)
 ):
     """Process a PDF file to extract quiz questions"""
     request_id = str(uuid.uuid4())
@@ -977,6 +1604,9 @@ async def handle_pdf(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             file_size_mb = len(content) / (1024 * 1024)
+            
+            # Generate file hash for DB storage
+            file_hash = hashlib.sha256(content).hexdigest()
             
             if file_size_mb > MAX_PDF_SIZE_MB:
                 raise HTTPException(
@@ -998,7 +1628,17 @@ async def handle_pdf(
         # Process asynchronously if requested
         if async_process:
             update_processing_status(request_id, "queued", 0.0, "PDF processing queued")
-            background_tasks.add_task(process_pdf_task, tmp_path, request_id, page_range)
+            # Modified background task function to include vector DB storage
+            background_tasks.add_task(
+                process_pdf_with_storage, 
+                tmp_path, 
+                request_id, 
+                page_range,
+                file_hash,
+                file.filename,
+                store_in_db,
+                vector_db
+            )
             return {
                 "request_id": request_id,
                 "status": "queued",
@@ -1009,7 +1649,15 @@ async def handle_pdf(
         # Process synchronously
         try:
             result = await asyncio.wait_for(
-                process_pdf_task(tmp_path, request_id, page_range),
+                process_pdf_with_storage(
+                    tmp_path, 
+                    request_id, 
+                    page_range,
+                    file_hash,
+                    file.filename,
+                    store_in_db,
+                    vector_db
+                ),
                 timeout=DEFAULT_TIMEOUT
             )
             
@@ -1036,6 +1684,27 @@ async def handle_pdf(
         logger.error(f"Request {request_id}: Error processing PDF: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+@app.post("/search")
+async def search_similar_questions(
+    query: str = Form(...),
+    limit: int = Form(5),
+    vector_db: Optional[VectorDatabase] = Depends(get_vector_db)
+):
+    """Search for questions similar to the query"""
+    if not vector_db:
+        raise HTTPException(status_code=400, detail="Vector database is not enabled")
+    
+    try:
+        similar_questions = await vector_db.find_similar_questions(query, limit)
+        return {
+            "questions": similar_questions,
+            "total": len(similar_questions),
+            "query": query
+        }
+    except Exception as e:
+        logger.error(f"Error searching questions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 @app.get("/status/{request_id}")
 async def get_processing_status(request_id: str):
