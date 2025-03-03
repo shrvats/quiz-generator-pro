@@ -50,20 +50,6 @@ def check_time_limit(start_time: float) -> bool:
     """Check if we're approaching the processing time limit"""
     return time.time() - start_time > MAX_PROCESSING_TIME
 
-def detect_question_numbering_format(page_text: str) -> str:
-    """Detect the question numbering format in the document"""
-    formats = [
-        (r'Q\.?\s*\d+', 'Q.NUMBER'),
-        (r'Question\s+\d+', 'Question NUMBER'),
-        (r'\n\d+\.\s+', 'NUMBER.'),
-    ]
-    
-    for pattern, format_name in formats:
-        if re.search(pattern, page_text):
-            return format_name
-    
-    return 'unknown'
-
 def extract_blocks_with_positions(doc, page_range=None) -> List[Dict]:
     """Extract text blocks with their positions and page information"""
     all_blocks = []
@@ -108,21 +94,9 @@ def extract_blocks_with_positions(doc, page_range=None) -> List[Dict]:
     
     return all_blocks
 
-def is_likely_option(block: Dict, option_font_sizes: List[float]) -> bool:
-    """Determine if a block is likely to be an option based on content and formatting"""
-    text = block["text"].strip()
-    
-    # Check pattern (A., B., C., D., etc.)
-    if re.match(r'^[A-D][\.\)]', text):
-        return True
-        
-    # Check size (options tend to have consistent font size)
-    if block["size"] in option_font_sizes:
-        # Single letter option (A, B, C, D)
-        if re.match(r'^[A-D]$', text):
-            return True
-            
-    return False
+def is_option_marker(text: str) -> bool:
+    """Check if text is an option marker (A, B, C, D with various formats)"""
+    return bool(re.match(r'^[A-D][\.\)]|^[A-D]$', text.strip()))
 
 def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
     """Categorize blocks into questions, options, explanations, etc."""
@@ -130,18 +104,9 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
         "questions": [],
         "options": [],
         "explanations": [],
-        "reminders": [],  # Added category for things to remember
+        "things_to_remember": [],
         "other": []
     }
-    
-    # Detect option font sizes (since options often share the same font)
-    option_font_sizes = []
-    for block in blocks:
-        text = block["text"].strip()
-        if re.match(r'^[A-D][\.\)]', text):
-            option_font_sizes.append(block["size"])
-    
-    option_font_sizes = list(set(option_font_sizes))  # Remove duplicates
     
     # First pass to identify question numbers
     question_starts = []
@@ -154,6 +119,13 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
             re.match(r'^Question\s+\d+', text) or
             re.match(r'^\d+\.\s+', text)):
             question_starts.append(i)
+    
+    # If no question starts found, try alternative approach
+    if not question_starts:
+        for i, block in enumerate(blocks):
+            if i > 0 and is_option_marker(blocks[i]["text"]):
+                # If we find an option marker, the previous block might be a question
+                question_starts.append(i-1)
     
     # Second pass to categorize blocks
     current_category = "other"
@@ -168,24 +140,23 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
             continue
             
         # Check if this is an option
-        if is_likely_option(block, option_font_sizes):
+        if is_option_marker(text):
             current_category = "options"
             categorized[current_category].append(block)
             continue
             
-        # Check for explanation markers
-        if (re.search(r'correct answer|explanation|thus,|therefore', text, re.IGNORECASE) or
-            text.startswith("The answer is") or
-            text.startswith("Answer:")):
+        # Check for explanation/answer markers
+        if (re.search(r'correct answer|explanation|answer:|thus,|therefore', text, re.IGNORECASE) or
+            text.startswith("The answer is")):
             current_category = "explanations"
             categorized[current_category].append(block)
             continue
-        
-        # Check for "things to remember" sections
-        if (re.search(r'remember|note:|important:|must:|warning', text, re.IGNORECASE) or
+            
+        # Check for "things to remember" markers
+        if (re.search(r'remember|note:|important|tips|key points', text, re.IGNORECASE) or
             text.startswith("Note:") or
             text.startswith("Remember:")):
-            current_category = "reminders"
+            current_category = "things_to_remember"
             categorized[current_category].append(block)
             continue
             
@@ -194,166 +165,121 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
     
     return categorized
 
-def identify_questions_from_blocks(blocks: List[Dict]) -> List[Dict]:
-    """Identify individual questions and their components from categorized blocks"""
-    questions = []
-    current_question = None
-    option_pattern = re.compile(r'^([A-D])[\.\)]?\s*(.*)', re.DOTALL)
+def extract_options(blocks: List[Dict]) -> Dict[str, str]:
+    """Extract options A, B, C, D from blocks"""
+    options = {}
+    current_option = None
+    option_text = ""
     
     for block in blocks:
         text = block["text"].strip()
         
-        # Check if this block is the start of a new question
-        question_match = re.search(r'Q\.?\s*(\d+)|Question\s+(\d+)|\n?(\d+)\.?\s+', text)
+        # Check if this is a new option marker
+        option_match = re.match(r'^([A-D])[\.\)]?\s*(.*)', text)
         
-        if question_match:
-            # Save previous question if any
-            if current_question:
-                questions.append(current_question)
-                
-            # Extract question number
-            q_num = next((g for g in question_match.groups() if g), "")
+        if option_match:
+            # Save previous option if any
+            if current_option:
+                options[current_option] = option_text.strip()
             
-            # Initialize new question
-            current_question = {
-                "id": int(q_num) if q_num.isdigit() else len(questions) + 1,
-                "text": text,
-                "options": {},
-                "correct_answer": None,
-                "explanation": "",
-                "reminders": "",  # Added field for things to remember
-                "blocks": [block]
-            }
-        elif current_question:
-            # Not a new question, so add to the current one
-            current_question["blocks"].append(block)
-            
-            # Try to categorize this block
-            option_match = option_pattern.match(text)
-            
-            if option_match:
-                # This is an option
-                option_letter, option_text = option_match.groups()
-                current_question["options"][option_letter] = option_text.strip()
-            elif re.search(r'correct\s+answer|the\s+answer\s+is', text, re.IGNORECASE):
-                # This might contain the correct answer
-                answer_match = re.search(r'([A-D])\s+is\s+(?:the\s+)?correct|correct\s+answer\s+is\s+([A-D])|answer\s+is\s+([A-D])|correct:\s*([A-D])', text, re.IGNORECASE)
-                if answer_match:
-                    correct = next((g for g in answer_match.groups() if g), "")
-                    current_question["correct_answer"] = correct
-                    
-                # Add to explanation
-                if current_question["explanation"]:
-                    current_question["explanation"] += " " + text
-                else:
-                    current_question["explanation"] = text
-            elif re.search(r'explanation|thus,|therefore', text, re.IGNORECASE):
-                # This is part of the explanation
-                if current_question["explanation"]:
-                    current_question["explanation"] += " " + text
-                else:
-                    current_question["explanation"] = text
-            elif re.search(r'remember|note:|important:|must:|warning', text, re.IGNORECASE):
-                # This is part of things to remember
-                if current_question["reminders"]:
-                    current_question["reminders"] += " " + text
-                else:
-                    current_question["reminders"] = text
-            elif not option_match and not current_question["options"]:
-                # If we haven't seen options yet, this is part of the question text
-                current_question["text"] += " " + text
+            # Start new option
+            current_option = option_match.group(1)
+            option_text = option_match.group(2) if option_match.group(2) else ""
+        elif current_option:
+            # Continue current option
+            option_text += " " + text
+    
+    # Save the last option
+    if current_option:
+        options[current_option] = option_text.strip()
+    
+    return options
+
+def identify_questions(doc, blocks: List[Dict]) -> List[Dict]:
+    """Identify individual questions and their components"""
+    categorized = categorize_blocks(blocks)
+    questions = []
+    
+    # First identify question boundaries
+    question_blocks = []
+    current_question = []
+    
+    for i, block in enumerate(categorized["questions"]):
+        text = block["text"].strip()
+        
+        # Check if this block starts a new question
+        is_new_question = (
+            re.match(r'^Q\.?\s*\d+', text) or 
+            re.match(r'^Question\s+\d+', text) or 
+            re.match(r'^\d+\.\s+', text)
+        )
+        
+        if is_new_question and current_question:
+            question_blocks.append(current_question)
+            current_question = [block]
+        else:
+            current_question.append(block)
     
     # Add the last question
     if current_question:
-        questions.append(current_question)
+        question_blocks.append(current_question)
     
+    # Now process each question
+    for i, blocks in enumerate(question_blocks):
+        # Extract question ID and text
+        question_text = " ".join(block["text"] for block in blocks)
+        question_id = i + 1
+        
+        # Try to extract ID from question text
+        id_match = re.search(r'Q\.?\s*(\d+)|Question\s+(\d+)|\s*(\d+)\.\s+', question_text)
+        if id_match:
+            extracted_id = next((g for g in id_match.groups() if g), None)
+            if extracted_id:
+                question_id = int(extracted_id)
+        
+        # Extract options for this question
+        options = extract_options(categorized["options"])
+        
+        # Extract correct answer
+        correct_answer = None
+        explanation = ""
+        
+        for block in categorized["explanations"]:
+            text = block["text"].strip()
+            explanation += " " + text
+            
+            # Try to find correct answer marker
+            answer_match = re.search(r'([A-D])\s+is\s+(?:the\s+)?correct|correct\s+answer\s+is\s+([A-D])|answer\s+is\s+([A-D])', text, re.IGNORECASE)
+            if answer_match:
+                for group in answer_match.groups():
+                    if group:
+                        correct_answer = group
+                        break
+        
+        # Extract things to remember
+        things_to_remember = ""
+        for block in categorized["things_to_remember"]:
+            things_to_remember += " " + block["text"].strip()
+        
+        # Extract tables for this question
+        tables = extract_tables_from_page(doc[blocks[0]["page"]])
+        
+        question = {
+            "id": question_id,
+            "question": clean_text(question_text),
+            "options": options,
+            "correct": correct_answer,
+            "explanation": explanation.strip(),
+            "things_to_remember": things_to_remember.strip(),
+            "has_table": len(tables) > 0,
+            "table_html": tables[0] if tables else None
+        }
+        
+        questions.append(question)
+    
+    # Sort questions by ID
+    questions.sort(key=lambda q: q["id"])
     return questions
-
-def extract_text_between_options(doc, question: Dict) -> Dict:
-    """Extract text that appears between options, which can help with option text disambiguation"""
-    result = question.copy()
-    
-    # We need the original page content to analyze option positions
-    option_blocks = {}
-    other_blocks = []
-    
-    # Filter blocks by page and identify option and non-option blocks
-    for block in question["blocks"]:
-        text = block["text"].strip()
-        option_match = re.match(r'^([A-D])[\.\)]', text)
-        
-        if option_match:
-            option_letter = option_match.group(1)
-            option_blocks[option_letter] = block
-        else:
-            other_blocks.append(block)
-    
-    # If we found option blocks, analyze what's between them
-    if len(option_blocks) >= 2:
-        # Sort options by vertical position
-        sorted_options = sorted(option_blocks.items(), key=lambda x: x[1]["bbox"][1])
-        
-        for i in range(len(sorted_options) - 1):
-            current_option, current_block = sorted_options[i]
-            next_option, next_block = sorted_options[i + 1]
-            
-            # Find blocks between these two options
-            between_blocks = []
-            for block in other_blocks:
-                # Check if block is between these options vertically
-                if (block["page"] == current_block["page"] and 
-                    block["bbox"][1] > current_block["bbox"][3] and
-                    block["bbox"][3] < next_block["bbox"][1] and
-                    block["bbox"][0] < current_block["bbox"][0] + 100):
-                    between_blocks.append(block)
-            
-            # If we found blocks between options, add their text to the current option
-            if between_blocks:
-                between_text = " ".join(b["text"] for b in between_blocks)
-                # Remove any option markers that might be at the end
-                between_text = re.sub(r'[A-D][\.\)].*$', '', between_text)
-                
-                if current_option in result["options"]:
-                    result["options"][current_option] += " " + between_text.strip()
-    
-    return result
-
-def extract_tables_for_question(doc, question: Dict) -> List[str]:
-    """Extract tables only for the specific question's pages and context"""
-    tables = []
-    page_nums = set(block["page"] for block in question["blocks"])
-    
-    # Get the vertical range of the question on each page
-    question_ranges = {}
-    for page_num in page_nums:
-        blocks_on_page = [b for b in question["blocks"] if b["page"] == page_num]
-        if blocks_on_page:
-            min_y = min(b["bbox"][1] for b in blocks_on_page)
-            max_y = max(b["bbox"][3] for b in blocks_on_page)
-            # Add some margin
-            question_ranges[page_num] = (max(0, min_y - 50), max_y + 50)
-    
-    # Extract tables that are within the question's context
-    for page_num in page_nums:
-        page = doc[page_num]
-        page_tables = extract_tables_from_page(page)
-        
-        # If we have vertical range info, filter tables that might be in this range
-        # This is approximate since we don't have position info for tables
-        if len(page_tables) > 0 and page_num in question_ranges:
-            # For now, just use the first table if there are multiple on the page
-            # A more sophisticated approach would analyze table position
-            tables.append(page_tables[0])
-    
-    # Deduplicate tables by content
-    unique_tables = []
-    table_contents = set()
-    for table in tables:
-        if table not in table_contents:
-            table_contents.add(table)
-            unique_tables.append(table)
-    
-    return unique_tables
 
 def extract_tables_from_page(page) -> List[str]:
     """Extract tables from a page and convert to HTML"""
@@ -398,103 +324,8 @@ def extract_tables_from_page(page) -> List[str]:
     
     return tables
 
-def extract_mathematical_content(text: str) -> Tuple[str, bool]:
-    """Enhance and identify mathematical content in text"""
-    math_patterns = [
-        r'[=\+\-\*\/\^\(\)]',
-        r'\d+\.\d+',
-        r'[αβγδεζηθικλμνξοπρστυφχψω]',
-        r'[ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]',
-        r'√|∑|∫|∂|∇|∞',
-        r'\b[A-Za-z]\s*=',
-        r'log|exp|sin|cos|tan',
-        r'var|std|avg|mean',
-    ]
-    
-    contains_math = any(re.search(pattern, text) for pattern in math_patterns)
-    
-    if contains_math:
-        replacements = [
-            (r'(\d+)\/(\d+)', r'\1÷\2'),
-            (r'(\w+)\^(\w+)', r'\1^{\2}'),
-            (r'sqrt\(([^)]+)\)', r'√(\1)'),
-            (r'alpha', 'α'), (r'beta', 'β'), (r'gamma', 'γ'),
-            (r'delta', 'δ'), (r'sigma', 'σ'), (r'theta', 'θ'),
-            (r'mu', 'μ'), (r'pi', 'π'), (r'lambda', 'λ')
-        ]
-        
-        for old, new in replacements:
-            text = re.sub(old, new, text)
-    
-    return text, contains_math
-
-def process_questions_and_options(identified_questions: List[Dict], doc) -> List[Dict]:
-    """Process identified questions to extract options and correct answers from categorized blocks"""
-    processed_questions = []
-    
-    for question in identified_questions:
-        enhanced_question = extract_text_between_options(doc, question)
-        
-        options = {}
-        correct_answer = None
-        
-        # Process options, ensuring full text is captured
-        for key, value in enhanced_question["options"].items():
-            # Clean option text
-            clean_value = value.strip()
-            # Remove any answer markers from option text
-            clean_value = re.sub(r'.*correct answer is.*', '', clean_value, flags=re.IGNORECASE)
-            options[key] = clean_value.strip()
-        
-        # Extract correct answer from different sources
-        # First, check if it's directly specified in the question
-        if enhanced_question.get("correct_answer"):
-            correct_answer = enhanced_question["correct_answer"]
-        
-        # Next, check the explanation
-        explanation = enhanced_question.get("explanation", "")
-        if explanation and not correct_answer:
-            answer_match = re.search(r'correct answer is\s+([A-D])|answer\s+is\s+([A-D])|correct:\s*([A-D])', 
-                                    explanation, re.IGNORECASE)
-            if answer_match:
-                correct = next((g for g in answer_match.groups() if g), "")
-                correct_answer = correct
-                
-        # Also check if any option is marked as "correct" in its text
-        for key, value in options.items():
-            if re.search(r'correct|right answer', value, re.IGNORECASE):
-                correct_answer = key
-                # Remove the "correct" marker from the option text
-                options[key] = re.sub(r'\s*\(correct\)|\s*\(right answer\)|\s*correct|\s*right answer', 
-                                     '', options[key], flags=re.IGNORECASE)
-        
-        # Extract tables specific to this question
-        tables = extract_tables_for_question(doc, enhanced_question)
-        
-        # Process mathematical content
-        question_text, contains_math = extract_mathematical_content(enhanced_question["text"])
-        
-        for key, value in options.items():
-            options[key], _ = extract_mathematical_content(value)
-        
-        processed_question = {
-            "id": enhanced_question["id"],
-            "question": question_text,
-            "options": options,
-            "correct": correct_answer,
-            "explanation": explanation,
-            "reminders": enhanced_question.get("reminders", ""),  # Add the reminders field
-            "has_table": len(tables) > 0,
-            "table_html": "\n".join(tables) if tables else None,
-            "contains_math": contains_math
-        }
-        
-        processed_questions.append(processed_question)
-    
-    return processed_questions
-
 def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict:
-    """Advanced PDF processing with layout analysis for mathematical and financial content"""
+    """Process PDF to extract quiz questions and answers"""
     start_time = time.time()
     
     try:
@@ -508,26 +339,14 @@ def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) ->
         if check_time_limit(start_time):
             return {"error": "Processing time limit exceeded during block extraction", "questions": [], "total_pages": total_pages}
         
-        categorized = categorize_blocks(blocks)
+        questions = identify_questions(doc, blocks)
         
         if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during block categorization", "questions": [], "total_pages": total_pages}
-            
-        identified_questions = identify_questions_from_blocks(blocks)
-        
-        if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during question identification", "questions": [], "total_pages": total_pages}
-        
-        processed_questions = process_questions_and_options(identified_questions, doc)
-        
-        if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during question processing", "questions": processed_questions, "total_pages": total_pages}
-        
-        processed_questions.sort(key=lambda q: q["id"])
+            return {"error": "Processing time limit exceeded during question processing", "questions": questions, "total_pages": total_pages}
         
         return {
-            "questions": processed_questions,
-            "total_questions": len(processed_questions),
+            "questions": questions,
+            "total_questions": len(questions),
             "total_pages": total_pages,
             "page_range": page_range,
             "processing_time": time.time() - start_time
