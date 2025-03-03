@@ -1,3 +1,4 @@
+import BackendStatusIndicator from './components/BackendStatusIndicator';
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { MathJaxContext, MathJax } from 'better-react-mathjax';
@@ -698,6 +699,7 @@ function App() {
         <p>Upload a PDF to generate an interactive quiz from financial and mathematical content</p>
       </header>
       <main className="app-main">
+        <BackendStatusIndicator />
         <MathJaxContext config={mathJaxConfig}>
           <QuizRenderer />
         </MathJaxContext>
