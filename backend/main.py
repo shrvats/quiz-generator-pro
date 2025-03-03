@@ -11,18 +11,15 @@ B. Implementing a staggered board system where only a few directors are elected 
 C. Issuing preferred shares that immediately convert to common shares in the case of a takeover.
 D. Creating a subsidiary that holds all the intellectual property, which can be sold in the event of a takeover.
 
-After submission, the answer should pop like this:
+After submission, the answer should appear like this:
 ------------------------------------------------
 The correct answer is C.
 Issuing preferred shares that automatically convert to common shares upon a takeover attempt dilutes the voting power and ownership percentage of the acquirer, directly impacting the feasibility and attractiveness of the takeover. This is a classic example of a poison pill tactic.
-A is incorrect. While granting a bonus to executives if the company remains independent might seem like a deterrent, it primarily serves as a retention tool rather than a structural mechanism that complicates or deters a hostile takeover directly. It does not affect the company's ownership structure or operational control during a takeover.
-B is incorrect. A staggered board system, where only a fraction of directors are elected in any single year, can indeed make hostile takeovers more difficult by prolonging the process required to gain control of the board. However, this is generally considered a separate governance mechanism rather than a classic poison pill, which typically involves changes to share distribution or ownership rights.
-D is incorrect. Creating a subsidiary to hold critical assets like intellectual property might make the main company less attractive to take over, but it does not directly interfere with the mechanics of a takeover or change the conditions during a takeover attempt. This strategy is more about asset protection and less about the immediate defensive reaction characteristic of poison pills.
-
-Things to Remember
-A poison pill, or shareholder rights plan, is a defensive strategy used by corporations to deter hostile takeovers by diluting the shares held by potential acquirers, making a takeover less attractive or more costly.
-Examples include issuing new shares to existing shareholders at a discount, allowing shareholders (except the acquirer) to buy more shares at a discount, or creating new classes of shares that increase voting rights for existing shareholders upon a trigger event.
-In 2012, Netflix adopted a poison pill after activist investor Carl Icahn acquired a significant stake. This plan was designed to be triggered if an individual or group acquired 10% (or 20% for institutional investors) of Netflix's shares, effectively preventing a hostile takeover without board approval.
+A is incorrect. While granting a bonus to executives if the company remains independent might seem like a deterrent, it primarily serves as a retention tool rather than a structural mechanism that deters a hostile takeover.
+B is incorrect. A staggered board system, though it prolongs the takeover process, is a governance mechanism rather than a classic poison pill.
+D is incorrect. Creating a subsidiary to hold critical assets does not directly interfere with takeover mechanics.
+Things to Remember:
+A poison pill is a defensive strategy to deter hostile takeovers by diluting the shares held by potential acquirers. Examples include issuing new shares at a discount or creating share classes with enhanced voting rights. (For instance, Netflix adopted a poison pill in 2012.)
 ------------------------------------------------
 
 Author: Quiz Parser Team
@@ -456,6 +453,9 @@ class PDFQuestionExtractor:
                 if q_id_match:
                     block.metadata["question_id"] = int(q_id_match.group(0))
                 continue
+            # APPENDED CHANGE: Exclude options that start with "Choice"
+            if re.match(r'^(?i:choice)', text):
+                continue
             option_match = re.match(r'^([A-F])[\.\)]\s+(.*)', text, re.DOTALL)
             if option_match:
                 letter = option_match.group(1)
@@ -534,7 +534,7 @@ class PDFQuestionExtractor:
         self.stats.options_found += len(options)
         text, correct_answer = self.cleaner.remove_answer_from_text(text)
         text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', text)
-        # APPENDED CHANGE: Extract "Things to Remember" section (if present) and remove it from the question text
+        # APPENDED CHANGE: Extract Things to Remember section if present
         text, things_to_remember = self._extract_things_to_remember(text)
         text, explanation = self._extract_explanation(text)
         bidder_data = self._extract_bidder_data(text)
@@ -672,9 +672,6 @@ class PDFQuestionExtractor:
         return options
     
     def _extract_things_to_remember(self, text: str) -> Tuple[str, str]:
-        """Extract 'Things to Remember' section from text.
-           APPENDED CHANGE: Capture header with optional colon and all text until the end.
-        """
         things_to_remember = ""
         pattern = r'Things to Remember[:\s]*\n(.+)$'
         match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
@@ -1217,4 +1214,17 @@ def test_edge_cases():
             result["details"]["expected_options"] = case["expected_options"]
             result["details"]["actual_options"] = list(question.options.keys())
             result["passed"] = all(opt in question.options for opt in case["expected_options"])
-       
+        if "expected_bidders" in case:
+            result["details"]["expected_bidders"] = case["expected_bidders"]
+            result["details"]["actual_bidders"] = len(question.bidder_data)
+            result["passed"] = len(question.bidder_data) == case["expected_bidders"]
+        if "expected_issues" in case:
+            result["details"]["expected_issues"] = case["expected_issues"]
+            result["details"]["actual_issues"] = question.validation_issues
+            result["passed"] = all(issue in question.validation_issues for issue in case["expected_issues"])
+        results.append(result)
+    return results
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
