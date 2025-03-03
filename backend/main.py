@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
 """
 PDF Quiz Parser - Production-level implementation
-A robust PDF parsing system to extract quiz questions from various PDF formats.
-
-Sample Question for Understanding:
-------------------------------------------------
-Q.4885 In corporate finance, companies often employ various defensive strategies to protect against hostile takeovers. Which of the following is an example of a poison pill?
-A. Granting a bonus to executives if the company remains independent after a takeover attempt.
-B. Implementing a staggered board system where only a few directors are elected each year.
-C. Issuing preferred shares that immediately convert to common shares in the case of a takeover.
-D. Creating a subsidiary that holds all the intellectual property, which can be sold in the event of a takeover.
-
-After submission, the answer should appear like this:
-------------------------------------------------
-The correct answer is C.
-Issuing preferred shares that automatically convert to common shares upon a takeover attempt dilutes the voting power and ownership percentage of the acquirer, directly impacting the feasibility and attractiveness of the takeover. This is a classic example of a poison pill tactic.
-A is incorrect. While granting a bonus to executives if the company remains independent might seem like a deterrent, it primarily serves as a retention tool rather than a structural mechanism that deters a hostile takeover.
-B is incorrect. A staggered board system, though it prolongs the takeover process, is a governance mechanism rather than a classic poison pill.
-D is incorrect. Creating a subsidiary to hold critical assets does not directly interfere with takeover mechanics.
-Things to Remember:
-A poison pill is a defensive strategy to deter hostile takeovers by diluting the shares held by potential acquirers. Examples include issuing new shares at a discount or creating share classes with enhanced voting rights. (For instance, Netflix adopted a poison pill in 2012.)
-------------------------------------------------
-
-Author: Quiz Parser Team
-Version: 1.0.0
+Robust PDF parsing system optimized for financial and exam content.
 """
 
 import re
@@ -37,7 +15,7 @@ import logging
 import tempfile
 import traceback
 from enum import Enum, auto
-from typing import List, Dict, Tuple, Optional, Any, Union, Set, NamedTuple
+from typing import List, Dict, Tuple, Optional, Any, Union, Set
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict, Counter
 import asyncio
@@ -48,7 +26,6 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form, BackgroundTasks, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
 
 # Optional OCR support
@@ -64,10 +41,7 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("quiz_parser.log")
-    ]
+    handlers=[logging.StreamHandler(), logging.FileHandler("quiz_parser.log")]
 )
 logger = logging.getLogger("quiz-pdf-parser")
 
@@ -75,37 +49,13 @@ logger = logging.getLogger("quiz-pdf-parser")
 MAX_PROCESSING_TIME = 120  # seconds
 MAX_RETRIES = 3
 DEFAULT_TIMEOUT = 55  # seconds
-SUPPORTED_LANGUAGES = ["en", "fr", "es", "de"]
 MIN_QUESTION_LENGTH = 10
 MAX_PDF_SIZE_MB = 100
 CACHE_EXPIRY = 3600
-MAX_PARALLEL_REQUESTS = 5
-MATH_PATTERN = r'(?:\$.*?\$)|(?:\\begin\{equation\}.*?\\end\{equation\})|(?:[=\+\-\*\/\^\(\)]|√|∑|∫|∂|∇|∞|\b[A-Za-z]\s*=)'
 
 ###############################
 # Data Models and Structures  #
 ###############################
-
-class BlockType(Enum):
-    UNKNOWN = auto()
-    QUESTION_ID = auto()
-    QUESTION_TEXT = auto()
-    OPTION_A = auto()
-    OPTION_B = auto()
-    OPTION_C = auto()
-    OPTION_D = auto()
-    OPTION_E = auto()
-    OPTION_F = auto()
-    CORRECT_ANSWER = auto()
-    EXPLANATION = auto()
-    REMEMBER = auto()
-    COPYRIGHT = auto()
-    PAGE_NUMBER = auto()
-    HEADER = auto()
-    FOOTER = auto()
-    TABLE = auto()
-    BIDDER_DATA = auto()
-    MATH = auto()
 
 class QuestionType(Enum):
     MULTIPLE_CHOICE = auto()
@@ -130,40 +80,15 @@ class TextSpan:
     font: str = ""
     size: float = 0
     color: int = 0
-
-@dataclass
-class TextBlock:
-    spans: List[TextSpan] = field(default_factory=list)
-    block_type: BlockType = BlockType.UNKNOWN
-    bbox: Tuple[float, float, float, float] = (0, 0, 0, 0)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    page_num: int = 0
     
+    # Add explicit properties to avoid attribute errors
     @property
-    def text(self) -> str:
-        return " ".join(span.text for span in self.spans)
+    def y0(self) -> float:
+        return self.bbox[1] if self.bbox else 0
     
     @property
     def x0(self) -> float:
-        return self.bbox[0]
-    
-    @property
-    def y0(self) -> float:
-        return self.bbox[1]
-    
-    @property
-    def x1(self) -> float:
-        return self.bbox[2]
-    
-    @property
-    def y1(self) -> float:
-        return self.bbox[3]
-
-@dataclass
-class BidderData:
-    bidder: str
-    shares: int
-    price: float
+        return self.bbox[0] if self.bbox else 0
 
 @dataclass
 class QuestionData:
@@ -174,16 +99,12 @@ class QuestionData:
     explanation: str = ""
     option_explanations: Dict[str, str] = field(default_factory=dict)
     things_to_remember: str = ""
-    bidder_data: List[BidderData] = field(default_factory=list)
     table_html: str = ""
     has_table: bool = False
-    has_bidder_data: bool = False
-    type: QuestionType = QuestionType.MULTIPLE_CHOICE
-    source_blocks: List[TextBlock] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    validation_issues: List[str] = field(default_factory=list)
-    contains_math: bool = False
+    has_math: bool = False
+    is_skipped: bool = False
     math_expressions: List[str] = field(default_factory=list)
+    validation_issues: List[str] = field(default_factory=list)
     
     @property
     def has_options(self) -> bool:
@@ -198,73 +119,66 @@ class QuestionData:
             "explanation": self.explanation,
             "things_to_remember": self.things_to_remember,
             "has_options": self.has_options,
-            "type": self.type.name,
+            "type": "MULTIPLE_CHOICE" if self.has_options else "UNKNOWN",
+            "is_skipped": self.is_skipped
         }
-        if self.has_bidder_data:
-            result["bidder_data"] = [
-                {"bidder": b.bidder, "shares": b.shares, "price": b.price} 
-                for b in self.bidder_data
-            ]
-            result["has_bidder_data"] = True
+        
         if self.has_table:
-            result["table_html"] = self.table_html
             result["has_table"] = True
-        if self.contains_math:
+            result["table_html"] = self.table_html
+            
+        if self.has_math:
             result["contains_math"] = True
             result["math_expressions"] = self.math_expressions
+            
+        if self.option_explanations:
+            result["option_explanations"] = self.option_explanations
+            
         if self.validation_issues:
             result["validation_issues"] = self.validation_issues
-        
-        # Generate the answer HTML exactly as shown in the example
+            
+        # Generate answer HTML
         result["answer_html"] = self._generate_answer_html()
         return result
     
     def _generate_answer_html(self) -> str:
-        """Generate the answer HTML in the exact format requested"""
+        """Generate the answer explanation HTML"""
         if not self.correct_answer:
             return ""
-            
+        
         lines = []
+        
+        # First line is always "The correct answer is X."
         lines.append(f"The correct answer is {self.correct_answer}.")
         
-        # Main explanation for the correct answer (first paragraph)
+        # Main explanation for the correct answer
         if self.explanation:
             lines.append(self.explanation)
-        elif self.correct_answer in self.options:
-            lines.append(self.options[self.correct_answer])
         
-        # Add explanation for each option
+        # Add explanations for each incorrect option
         for letter in sorted(self.options.keys()):
             if letter == self.correct_answer:
                 continue
                 
-            # Get explanation for this specific option
             explanation = self.option_explanations.get(letter, "")
-            if not explanation:
-                option_text = self.options.get(letter, "")
-                explanation = f"While {option_text}, this is not the correct answer."
-                
-            lines.append(f"{letter} is incorrect. {explanation}")
+            if explanation:
+                lines.append(f"{letter} is incorrect. {explanation}")
         
-        # Add Things to Remember section if present
+        # Add "Things to Remember" section if present
         if self.things_to_remember:
             lines.append("Things to Remember:")
             lines.append(self.things_to_remember)
             
         return "\n".join(lines)
 
-class ParsingStatistics:
+class ProcessingStats:
     def __init__(self):
         self.start_time = time.time()
         self.total_pages = 0
         self.processed_pages = 0
-        self.total_blocks = 0
         self.questions_found = 0
-        self.options_found = 0
         self.tables_found = 0
-        self.math_expressions_found = 0
-        self.bidder_data_found = 0
-        self.questions_with_issues = 0
+        self.math_found = 0
         self.errors = []
         self.warnings = []
         self.ocr_used = False
@@ -277,13 +191,9 @@ class ParsingStatistics:
             "elapsed_time_seconds": self.elapsed_time(),
             "total_pages": self.total_pages,
             "processed_pages": self.processed_pages,
-            "total_blocks": self.total_blocks,
             "questions_found": self.questions_found,
-            "options_found": self.options_found,
             "tables_found": self.tables_found,
-            "math_expressions_found": self.math_expressions_found,
-            "bidder_data_found": self.bidder_data_found,
-            "questions_with_issues": self.questions_with_issues,
+            "math_found": self.math_found,
             "errors": self.errors,
             "warnings": self.warnings,
             "ocr_used": self.ocr_used
@@ -294,7 +204,7 @@ class ProcessingResult:
         self.questions = questions or []
         self.total_pages = total_pages
         self.error = error
-        self.stats = ParsingStatistics()
+        self.stats = ProcessingStats()
         
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -314,8 +224,7 @@ class PDFInfoResponse(BaseModel):
     metadata: Dict[str, str]
     estimated_questions: int = 0
     has_toc: bool = False
-    language: str = "en"
-    
+
 class ProcessingStatus(BaseModel):
     request_id: str
     status: str
@@ -323,41 +232,28 @@ class ProcessingStatus(BaseModel):
     message: str
     timestamp: float = Field(default_factory=time.time)
 
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    uptime: float
-    memory_usage_mb: float
-
 class QuizSubmission(BaseModel):
     question_id: int
     selected_answer: str
 
-class QuizSubmissionResponse(BaseModel):
-    question_id: int
-    selected_answer: str
-    correct_answer: str
-    is_correct: bool
-    explanation_html: str
-
 ###################################
-#     PDF Processing Core       #
+#     PDF Processing Core         #
 ###################################
 
 class MathExtractor:
-    """Extract mathematical expressions from text"""
+    """Extracts mathematical expressions from text"""
     
     @staticmethod
-    def extract_expressions(text: str) -> List[str]:
+    def extract_math(text: str) -> List[str]:
         """Extract mathematical expressions from text"""
         expressions = []
         
-        # Extract LaTeX-style expressions
+        # LaTeX math patterns
         latex_patterns = [
-            r'\$.*?\$',  # Inline math
-            r'\$\$.*?\$\$',  # Display math
-            r'\\begin\{equation\}.*?\\end\{equation\}',  # Equation environment
-            r'\\begin\{align\}.*?\\end\{align\}'  # Align environment
+            r'\$\$.+?\$\$',  # Display math
+            r'\$.+?\$',      # Inline math
+            r'\\begin\{equation\}.+?\\end\{equation\}',  # Equation environment
+            r'\\begin\{align\}.+?\\end\{align\}'         # Align environment
         ]
         
         for pattern in latex_patterns:
@@ -365,26 +261,27 @@ class MathExtractor:
             for match in matches:
                 expressions.append(match.group(0))
         
-        # Extract other potential math expressions
-        math_symbols = r'[=\+\-\*\/\^\(\)]|√|∑|∫|∂|∇|∞'
-        var_assignment = r'\b[A-Za-z]\s*='
+        # Extract other mathematical expressions
+        math_symbols = r'[=\+\-\*\/\^\(\)]|√|∑|∫|∂|∇|∞|α|β|γ|δ|ε|θ|λ|μ|π|σ|φ|ω'
+        var_assign = r'\b[A-Za-z]\s*='
         
-        # Find sequences with multiple math symbols or variable assignments
-        text_without_latex = text
+        # Clean text by removing already found expressions
+        text_cleaned = text
         for expr in expressions:
-            text_without_latex = text_without_latex.replace(expr, " ")
+            text_cleaned = text_cleaned.replace(expr, " ")
         
-        words = text_without_latex.split()
+        # Find other expressions with math symbols
+        words = text_cleaned.split()
         for word in words:
-            if (len(re.findall(math_symbols, word)) > 1 or
-                re.search(var_assignment, word)):
+            if (len(re.findall(math_symbols, word)) > 1 or 
+                re.search(var_assign, word)):
                 if word not in expressions:
                     expressions.append(word)
         
         return expressions
 
 class OCRProcessor:
-    """Process PDF content with OCR when needed"""
+    """Processes images to extract text using OCR"""
     
     @staticmethod
     def is_available() -> bool:
@@ -392,65 +289,123 @@ class OCRProcessor:
     
     @staticmethod
     def process_page(page) -> str:
-        """Process a PDF page with OCR to extract text"""
+        """Process a page with OCR"""
         if not OCR_AVAILABLE:
             return ""
         
         try:
-            # Convert page to image
+            # Convert page to image with higher resolution for better OCR
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
-            # Run OCR
-            text = pytesseract.image_to_string(img, lang='eng')
+            # Use custom OCR configuration for better results
+            custom_config = r'--oem 3 --psm 6'
+            text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
             return text
         except Exception as e:
             logger.error(f"OCR processing error: {str(e)}")
             return ""
+    
+    @staticmethod
+    def process_region(page, bbox) -> str:
+        """Process a specific region of a page with OCR"""
+        if not OCR_AVAILABLE:
+            return ""
+        
+        try:
+            mat = fitz.Matrix(2, 2)
+            clip = fitz.Rect(bbox)
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            custom_config = r'--oem 3 --psm 6'
+            text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
+            return text
+        except Exception as e:
+            logger.error(f"OCR region processing error: {str(e)}")
+            return ""
 
 class PDFTextCleaner:
+    """Cleans and processes PDF text"""
+    
     @staticmethod
     def clean_text(text: str) -> str:
+        """Clean general text from PDFs"""
+        # Remove copyright notices
         text = re.sub(r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?.*?(?=\n|$)', '', text, flags=re.IGNORECASE)
+        
+        # Remove page numbers
         text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
         text = re.sub(r'^[ \t]*\d+[ \t]*$', '', text, flags=re.MULTILINE)
-        text = re.sub(r'\n\s*\d+\s*$', '\n', text, flags=re.MULTILINE)
-        # Clean up multiple whitespaces
+        
+        # Clean up whitespace
         text = re.sub(r' +', ' ', text)
-        # Clean up multiple newlines
         text = re.sub(r'\n+', '\n', text)
+        
         return text.strip()
     
     @staticmethod
-    def remove_answer_from_text(text: str) -> Tuple[str, Optional[str]]:
+    def extract_options(text: str) -> Dict[str, str]:
+        """Extract options from text"""
+        options = {}
+        
+        # Multiple option patterns for different formats
+        option_patterns = [
+            r'\n\s*([A-F])[\.\)]\s+(.*?)(?=\n\s*[A-F][\.\)]|\Z)',  # Standard with newlines
+            r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\Z)',         # Compact without newlines
+            r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\n\s*[A-F][\.\)]|\Z)'  # Mixed format
+        ]
+        
+        # Try each pattern
+        for pattern in option_patterns:
+            matches = list(re.finditer(pattern, text, re.DOTALL))
+            
+            for match in matches:
+                letter = match.group(1).upper()  # Ensure uppercase
+                option_text = match.group(2).strip()
+                
+                # Clean option text
+                option_text = re.sub(r'(?:is correct|correct answer|is incorrect).*', '', option_text, flags=re.IGNORECASE)
+                
+                if option_text:
+                    options[letter] = option_text.strip()
+            
+            # If found some options, stop trying patterns
+            if len(options) >= 2:
+                break
+        
+        return options
+    
+    @staticmethod
+    def extract_correct_answer(text: str) -> Tuple[str, Optional[str]]:
+        """Extract the correct answer from text"""
         correct_answer = None
+        
+        # Multiple patterns to identify the correct answer
         patterns = [
             r'The correct answer is\s*([A-F])\..*?(?=\n|$)',
             r'Correct answer[:\s]+([A-F])\.?.*?(?=\n|$)',
             r'The answer is\s*([A-F])\.?.*?(?=\n|$)',
             r'Answer[:\s]+([A-F])\.?.*?(?=\n|$)',
-            r'The correct choice is\s*([A-F])\.?.*?(?=\n|$)'
+            r'The correct choice is\s*([A-F])\.?.*?(?=\n|$)',
+            r'([A-F])\s+is\s+(?:the\s+)?correct\s+(?:answer|option|choice)'
         ]
+        
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
-                correct_answer = match.group(1)
+                correct_answer = match.group(1).upper()
                 text = text[:match.start()] + text[match.end():]
                 break
+        
         return text, correct_answer
     
     @staticmethod
-    def clean_option_text(text: str) -> str:
-        text = re.sub(r'(?:is correct|correct answer|is incorrect).*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?.*?(?=\n|$)', '', text, flags=re.IGNORECASE)
-        return text.strip()
-    
-    @staticmethod
     def extract_option_explanations(text: str) -> Dict[str, str]:
-        """Extract explanations for each option from text"""
+        """Extract explanations for individual options"""
         explanations = {}
         
-        # Patterns for option explanations
+        # Patterns to extract option-specific explanations
         patterns = [
             r'([A-F])\s+is\s+(?:correct|incorrect)[\.:]?\s+(.*?)(?=(?:[A-F]\s+is\s+(?:correct|incorrect))|$)',
             r'Option\s+([A-F])[:\.\)]\s+(.*?)(?=(?:Option\s+[A-F])|$)',
@@ -466,16 +421,175 @@ class PDFTextCleaner:
                     explanations[letter] = explanation
         
         return explanations
+    
+    @staticmethod
+    def extract_things_to_remember(text: str) -> Tuple[str, str]:
+        """Extract 'Things to Remember' section"""
+        things_to_remember = ""
+        
+        patterns = [
+            r'Things to Remember[:\s]*\n(.+)$',
+            r'Things to Remember[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Remember[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Note[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Important[:\s]+(.*?)(?=\n\n|\Z)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                things_to_remember = match.group(1).strip()
+                text = text[:match.start()] + text[match.end():]
+                break
+        
+        return text, things_to_remember
+    
+    @staticmethod
+    def extract_explanation(text: str) -> Tuple[str, str]:
+        """Extract explanation section"""
+        explanation = ""
+        
+        patterns = [
+            r'Explanation[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Therefore[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Thus[:\s]+(.*?)(?=\n\n|\Z)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                explanation = match.group(1).strip()
+                text = text[:match.start()] + text[match.end():]
+                break
+        
+        return text, explanation
+
+class TableExtractor:
+    """Extracts and formats tables from PDFs"""
+    
+    @staticmethod
+    def detect_tables(doc, page_idx) -> List[Tuple[float, float, float, float]]:
+        """Detect potential table regions on a page"""
+        try:
+            page = doc[page_idx]
+            
+            # Look for patterns that could indicate tables:
+            # 1. Multiple horizontal lines close together
+            # 2. Text arranged in grid-like patterns
+            
+            # Get the text blocks
+            blocks = page.get_text("dict")["blocks"]
+            
+            table_regions = []
+            for i, block in enumerate(blocks):
+                # Check if the block might be a table
+                if "lines" in block and len(block.get("lines", [])) >= 3:
+                    # Check for grid-like pattern of text
+                    spans_by_line = []
+                    for line in block["lines"]:
+                        if "spans" in line:
+                            spans_by_line.append(len(line["spans"]))
+                    
+                    # If there are multiple lines with multiple spans, might be a table
+                    if len(spans_by_line) >= 3 and sum(spans_by_line) >= 6:
+                        table_regions.append(block["bbox"])
+            
+            return table_regions
+        except Exception as e:
+            logger.error(f"Table detection error: {str(e)}")
+            return []
+    
+    @staticmethod
+    def extract_table(doc, page_idx, bbox) -> str:
+        """Extract table content as HTML"""
+        try:
+            page = doc[page_idx]
+            
+            # Get text from the table region
+            table_text = page.get_text("dict", clip=bbox)
+            
+            # Extract rows based on vertical position
+            rows_by_y = defaultdict(list)
+            
+            if "blocks" in table_text:
+                for block in table_text["blocks"]:
+                    if "lines" not in block:
+                        continue
+                    
+                    for line in block["lines"]:
+                        if "spans" not in line:
+                            continue
+                        
+                        y_pos = round(line["bbox"][1])  # y0 coordinate
+                        spans = []
+                        for span in line["spans"]:
+                            if "text" in span and span["text"].strip():
+                                spans.append(span["text"])
+                        
+                        # Add text to the corresponding row
+                        if spans:
+                            rows_by_y[y_pos].extend(spans)
+            
+            # Sort rows by vertical position
+            sorted_y = sorted(rows_by_y.keys())
+            rows = [rows_by_y[y] for y in sorted_y]
+            
+            # Generate HTML table
+            if not rows:
+                return ""
+            
+            # Check if first row might be headers
+            headers = []
+            if rows:
+                first_row = rows[0]
+                if len(first_row) >= 2:
+                    # First row could be headers if it differs from others
+                    headers = first_row
+                    rows = rows[1:]
+            
+            html = ["<table class='quiz-table' border='1'>"]
+            
+            # Add headers if found
+            if headers:
+                html.append("<thead>")
+                html.append("<tr>")
+                for header in headers:
+                    html.append(f"<th>{header}</th>")
+                html.append("</tr>")
+                html.append("</thead>")
+            
+            # Add data rows
+            html.append("<tbody>")
+            for row in rows:
+                html.append("<tr>")
+                for cell in row:
+                    # Check if cell might be numeric for alignment
+                    align = " class='numeric'" if re.match(r'^[\d\.\$]+$', cell) else ""
+                    html.append(f"<td{align}>{cell}</td>")
+                html.append("</tr>")
+            html.append("</tbody>")
+            html.append("</table>")
+            
+            return "\n".join(html)
+        
+        except Exception as e:
+            logger.error(f"Table extraction error: {str(e)}")
+            return ""
 
 class PDFQuestionExtractor:
-    def __init__(self, method: ParsingMethod = ParsingMethod.HYBRID):
+    """Extracts quiz questions from PDF documents"""
+    
+    def __init__(self, method: ParsingMethod = ParsingMethod.TEXT_BASED):
         self.method = method
         self.cleaner = PDFTextCleaner()
-        self.stats = ParsingStatistics()
-        
+        self.stats = ProcessingStats()
+    
     def extract_from_document(self, doc, page_range=None) -> List[QuestionData]:
-        self.stats = ParsingStatistics()
+        """Main method to extract questions from a PDF document"""
+        self.stats = ProcessingStats()
         self.stats.total_pages = len(doc)
+        
+        # Set page range
         if page_range:
             start_page, end_page = page_range
             start_page = max(0, start_page)
@@ -483,37 +597,35 @@ class PDFQuestionExtractor:
             page_iterator = range(start_page, end_page + 1)
         else:
             page_iterator = range(len(doc))
+        
         self.stats.processed_pages = len(page_iterator)
         
-        # Check if OCR might be needed
-        needs_ocr = False
+        # Check if OCR is needed
+        needs_ocr = self._check_if_ocr_needed(doc, page_iterator)
+        
+        # Default to text-based extraction
+        return self._extract_text_based(doc, page_iterator, use_ocr=needs_ocr)
+    
+    def _check_if_ocr_needed(self, doc, page_iterator) -> bool:
+        """Determine if OCR should be used"""
+        if not OCRProcessor.is_available():
+            return False
+        
         for i in range(min(3, len(page_iterator))):
             page_idx = page_iterator[i]
             page = doc[page_idx]
             text = page.get_text("text")
-            if len(text.strip()) < 50:  # Not enough text
-                if OCRProcessor.is_available():
-                    needs_ocr = True
-                    self.stats.ocr_used = True
-                    break
+            
+            # If page has very little text, try OCR
+            if len(text.strip()) < 50:
+                self.stats.ocr_used = True
+                return True
         
-        if needs_ocr:
-            logger.info("Using OCR for text extraction")
-        
-        if self.method == ParsingMethod.TEXT_BASED:
-            return self._extract_text_based(doc, page_iterator, use_ocr=needs_ocr)
-        elif self.method == ParsingMethod.BLOCK_BASED:
-            return self._extract_block_based(doc, page_iterator)
-        else:
-            try:
-                questions = self._extract_block_based(doc, page_iterator)
-                if questions:
-                    return questions
-            except Exception as e:
-                logger.warning(f"Block-based extraction failed: {str(e)}, falling back to text-based")
-            return self._extract_text_based(doc, page_iterator, use_ocr=needs_ocr)
+        return False
     
     def _extract_text_based(self, doc, page_iterator, use_ocr=False) -> List[QuestionData]:
+        """Extract questions using text-based approach"""
+        # Get text from all relevant pages
         all_text = ""
         for page_num in page_iterator:
             page = doc[page_num]
@@ -522,61 +634,51 @@ class PDFQuestionExtractor:
             # Use OCR if needed
             if use_ocr and len(page_text.strip()) < 50:
                 page_text = OCRProcessor.process_page(page)
-                
+            
             all_text += page_text + "\n"
         
-        # Extract math expressions from the entire text
-        math_expressions = MathExtractor.extract_expressions(all_text)
-        self.stats.math_expressions_found = len(math_expressions)
+        # Find math expressions
+        math_expressions = MathExtractor.extract_math(all_text)
+        self.stats.math_found += len(math_expressions)
         
-        question_pattern = r'(?:Question\s+(\d+)(?:\(Q\.\d+\))?|Q\.?\s*(\d+)(?:\(Q\.\d+\))?)'
-        question_matches = list(re.finditer(question_pattern, all_text))
-        self.stats.questions_found = len(question_matches)
+        # Find question boundaries
+        questions_text = self._split_into_questions(all_text)
+        self.stats.questions_found = len(questions_text)
         
-        if not question_matches:
-            alternate_pattern = r'\n\s*(\d+)[\.\)]\s+'
-            alternate_matches = list(re.finditer(alternate_pattern, all_text))
-            if alternate_matches:
-                question_matches = alternate_matches
-                self.stats.questions_found = len(alternate_matches)
-                self.stats.warnings.append("Used alternate question numbering pattern")
-        
+        # Process each question
         questions = []
-        for i, match in enumerate(question_matches):
+        for i, q_text in enumerate(questions_text):
             try:
-                q_id = None
-                for group in match.groups() or []:
-                    if group:
-                        q_id = group
-                        break
-                if not q_id and match.group(0):
-                    q_id_match = re.search(r'\d+', match.group(0))
-                    if q_id_match:
-                        q_id = q_id_match.group(0)
-                if not q_id:
-                    q_id = str(i + 1)
+                # Extract ID and process question
+                q_id, q_number = self._extract_question_id(q_text, i)
                 
-                start_pos = match.start()
-                if i < len(question_matches) - 1:
-                    end_pos = question_matches[i+1].start()
-                else:
-                    end_pos = len(all_text)
+                # Process the question
+                question = self._process_question_text(q_text, q_id)
                 
-                question_text = all_text[start_pos:end_pos]
+                # Add math expressions if present
+                question_math = [expr for expr in math_expressions if expr in q_text]
+                if question_math:
+                    question.has_math = True
+                    question.math_expressions = question_math
                 
-                # Check if this question text contains math expressions
-                question_math = [expr for expr in math_expressions 
-                                if expr in question_text]
+                # Check for tables
+                if self._text_might_have_table(q_text):
+                    # Find the page this question is on
+                    for page_num in page_iterator:
+                        page = doc[page_num]
+                        if q_text in page.get_text("text"):
+                            table_regions = TableExtractor.detect_tables(doc, page_num)
+                            if table_regions:
+                                html = TableExtractor.extract_table(doc, page_num, table_regions[0])
+                                if html:
+                                    question.has_table = True
+                                    question.table_html = html
+                                    self.stats.tables_found += 1
+                                    break
                 
-                question_data = self._process_question_text(question_text, int(q_id))
-                
-                if question_data:
-                    if question_math:
-                        question_data.contains_math = True
-                        question_data.math_expressions = question_math
-                    
-                    if question_data.text:
-                        questions.append(question_data)
+                # Add the question if valid
+                if question and question.text:
+                    questions.append(question)
             except Exception as e:
                 logger.error(f"Error processing question {i+1}: {str(e)}")
                 logger.error(traceback.format_exc())
@@ -584,358 +686,148 @@ class PDFQuestionExtractor:
         
         return questions
     
-    def _extract_block_based(self, doc, page_iterator) -> List[QuestionData]:
-        blocks = self._extract_blocks(doc, page_iterator)
-        self.stats.total_blocks = len(blocks)
+    def _split_into_questions(self, text: str) -> List[str]:
+        """Split text into individual questions"""
+        # Try different patterns to find question boundaries
         
-        # Extract math expressions from all blocks
-        all_text = " ".join(block.text for block in blocks)
-        math_expressions = MathExtractor.extract_expressions(all_text)
-        self.stats.math_expressions_found = len(math_expressions)
+        # Pattern 1: Standard question numbering (Question X or Q.X)
+        question_pattern = r'(?:Question\s+(\d+)(?:\(Q\.\d+\))?|Q\.?\s*(\d+)(?:\(Q\.\d+\))?)'
+        question_matches = list(re.finditer(question_pattern, text))
         
-        # Update block metadata with math expression information
-        for block in blocks:
-            block_math = [expr for expr in math_expressions if expr in block.text]
-            if block_math:
-                block.metadata["contains_math"] = True
-                block.metadata["math_expressions"] = block_math
+        if question_matches:
+            return self._split_by_matches(text, question_matches)
         
-        classified_blocks = self._classify_blocks(blocks)
-        question_blocks = self._group_blocks_by_question(classified_blocks)
-        self.stats.questions_found = len(question_blocks)
+        # Pattern 2: Simple numbered items
+        alternate_pattern = r'\n\s*(\d+)[\.\)]\s+'
+        alternate_matches = list(re.finditer(alternate_pattern, text))
         
+        if alternate_matches:
+            self.stats.warnings.append("Used alternate question numbering pattern")
+            return self._split_by_matches(text, alternate_matches)
+        
+        # Pattern 3: Option-based splitting (look for A. B. C. pattern)
+        option_pattern = r'\n\s*A[\.\)]\s+.*?\n\s*B[\.\)]\s+'
+        option_matches = list(re.finditer(option_pattern, text))
+        
+        if option_matches:
+            self.stats.warnings.append("Used option-based question splitting")
+            return self._split_by_options(text, option_matches)
+        
+        # If no clear boundaries, treat as one question
+        self.stats.warnings.append("No clear question boundaries found")
+        return [text]
+    
+    def _split_by_matches(self, text: str, matches: List[re.Match]) -> List[str]:
+        """Split text at the matched positions"""
         questions = []
-        for i, q_blocks in enumerate(question_blocks):
-            try:
-                q_id = q_blocks[0].metadata.get("question_id") if q_blocks else i + 1
-                question_data = self._process_question_blocks(q_blocks, q_id)
-                
-                # Check if any block in this question contains math
-                has_math = any(block.metadata.get("contains_math", False) for block in q_blocks)
-                if has_math:
-                    question_data.contains_math = True
-                    # Collect all math expressions from blocks in this question
-                    question_data.math_expressions = []
-                    for block in q_blocks:
-                        if block.metadata.get("contains_math", False):
-                            question_data.math_expressions.extend(
-                                block.metadata.get("math_expressions", [])
-                            )
-                
-                if question_data and question_data.text:
-                    questions.append(question_data)
-            except Exception as e:
-                logger.error(f"Error processing question from blocks {i+1}: {str(e)}")
-                logger.error(traceback.format_exc())
-                self.stats.errors.append(f"Error processing question from blocks {i+1}: {str(e)}")
         
+        for i, match in enumerate(matches):
+            start_pos = match.start()
+            
+            if i < len(matches) - 1:
+                end_pos = matches[i+1].start()
+            else:
+                end_pos = len(text)
+                
+            question_text = text[start_pos:end_pos]
+            if question_text.strip():
+                questions.append(question_text)
+                
         return questions
     
-    def _extract_blocks(self, doc, page_iterator) -> List[TextBlock]:
-        blocks = []
-        for page_num in page_iterator:
-            page = doc[page_num]
-            page_dict = page.get_text("dict")
-            for block in page_dict["blocks"]:
-                if "lines" not in block:
-                    continue
-                text_block = TextBlock(
-                    spans=[],
-                    bbox=block["bbox"],
-                    page_num=page_num
-                )
-                for line in block["lines"]:
-                    if "spans" not in line:
-                        continue
-                    for span in line["spans"]:
-                        if not span.get("text", "").strip():
-                            continue
-                        text_block.spans.append(TextSpan(
-                            text=span.get("text", ""),
-                            bbox=span.get("bbox", (0, 0, 0, 0)),
-                            font=span.get("font", ""),
-                            size=span.get("size", 0),
-                            color=span.get("color", 0)
-                        ))
-                if text_block.spans:
-                    blocks.append(text_block)
-        return blocks
-    
-    def _classify_blocks(self, blocks: List[TextBlock]) -> List[TextBlock]:
-        for block in blocks:
-            text = block.text
-            if not text.strip():
-                continue
-            if re.search(r'(?:©|Copyright\s*©?)\s*\d{4}', text, re.IGNORECASE):
-                block.block_type = BlockType.COPYRIGHT
-                continue
-            if re.match(r'^\s*\d+\s*$', text):
-                block.block_type = BlockType.PAGE_NUMBER
-                continue
-            if re.match(r'(?:Question\s+\d+|Q\.\s*\d+)', text):
-                block.block_type = BlockType.QUESTION_ID
-                q_id_match = re.search(r'\d+', text)
-                if q_id_match:
-                    block.metadata["question_id"] = int(q_id_match.group(0))
-                continue
-            # APPENDED CHANGE: Exclude options that start with "Choice"
-            if re.match(r'^(?i:choice)', text):
-                continue
-            option_match = re.match(r'^([A-F])[\.\)]\s+(.*)', text, re.DOTALL)
-            if option_match:
-                letter = option_match.group(1)
-                option_text = option_match.group(2).strip()
-                if letter == 'A':
-                    block.block_type = BlockType.OPTION_A
-                elif letter == 'B':
-                    block.block_type = BlockType.OPTION_B
-                elif letter == 'C':
-                    block.block_type = BlockType.OPTION_C
-                elif letter == 'D':
-                    block.block_type = BlockType.OPTION_D
-                elif letter == 'E':
-                    block.block_type = BlockType.OPTION_E
-                elif letter == 'F':
-                    block.block_type = BlockType.OPTION_F
-                block.metadata["option_letter"] = letter
-                block.metadata["option_text"] = option_text
-                self.stats.options_found += 1
-                continue
-            if re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)', text, re.IGNORECASE):
-                block.block_type = BlockType.CORRECT_ANSWER
-                answer_match = re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)\s*([A-F])', text, re.IGNORECASE)
-                if answer_match:
-                    block.metadata["correct_answer"] = answer_match.group(1)
-                continue
-            if re.search(r'(?:Things to Remember|Remember:|Note:)', text, re.IGNORECASE):
-                block.block_type = BlockType.REMEMBER
-                continue
-            if re.search(r'(?:Explanation:|Therefore:|Thus:)', text, re.IGNORECASE):
-                block.block_type = BlockType.EXPLANATION
-                continue
-            if len(block.spans) >= 3 and len(set(span.y0 for span in block.spans)) >= 3:
-                block.block_type = BlockType.TABLE
-                self.stats.tables_found += 1
-                continue
-            bidder_matches = list(re.finditer(r'([A-G])\s+([\d,\s]+)\s+\$([\d\.]+)', text))
-            if len(bidder_matches) >= 2:
-                block.block_type = BlockType.BIDDER_DATA
-                bidders = []
-                for match in bidder_matches:
-                    bidder = match.group(1)
-                    shares_str = match.group(2).replace(",", "").replace(" ", "")
-                    price_str = match.group(3)
-                    try:
-                        shares = int(shares_str)
-                        price = float(price_str)
-                        bidders.append(BidderData(bidder, shares, price))
-                    except ValueError:
-                        pass
-                if bidders:
-                    block.metadata["bidders"] = bidders
-                    self.stats.bidder_data_found += 1
-                continue
-            if re.search(r'[=\+\-\*\/\^\(\)]|√|∑|∫|∂|∇|∞|\b[A-Za-z]\s*=', text):
-                block.metadata["contains_math"] = True
-                block.metadata["math_expressions"] = MathExtractor.extract_expressions(text)
-                self.stats.math_expressions_found += 1
-        return blocks
-    
-    def _group_blocks_by_question(self, blocks: List[TextBlock]) -> List[List[TextBlock]]:
-        question_starts = []
-        for i, block in enumerate(blocks):
-            if block.block_type == BlockType.QUESTION_ID:
-                question_starts.append(i)
-        if not question_starts:
-            # Try alternative grouping based on options
-            return self._group_blocks_by_options(blocks)
-        question_blocks = []
-        for i, start_idx in enumerate(question_starts):
-            end_idx = question_starts[i+1] if i+1 < len(question_starts) else len(blocks)
-            question_blocks.append(blocks[start_idx:end_idx])
-        return question_blocks
-    
-    def _group_blocks_by_options(self, blocks: List[TextBlock]) -> List[List[TextBlock]]:
-        """Alternative grouping strategy when question IDs aren't found"""
-        logger.warning("No question boundaries found, trying to group by options")
-        self.stats.warnings.append("Grouped questions by options")
+    def _split_by_options(self, text: str, option_matches: List[re.Match]) -> List[str]:
+        """Split text based on option patterns"""
+        questions = []
+        prev_end = 0
         
-        # Find blocks that contain options
-        option_indices = []
-        for i, block in enumerate(blocks):
-            if block.block_type in [BlockType.OPTION_A, BlockType.OPTION_B, 
-                                   BlockType.OPTION_C, BlockType.OPTION_D]:
-                if block.block_type == BlockType.OPTION_A:
-                    option_indices.append(i)
+        for i, match in enumerate(option_matches):
+            # Look for the start of this question (before options)
+            start_pos = text.rfind('\n', 0, match.start())
+            if start_pos == -1:
+                start_pos = 0
+            else:
+                start_pos += 1  # Skip the newline
+                
+            # If too close to previous question end, adjust
+            if start_pos < prev_end:
+                start_pos = prev_end
+                
+            # Find the end (next option pattern or end of text)
+            if i < len(option_matches) - 1:
+                end_pos = option_matches[i+1].start()
+            else:
+                end_pos = len(text)
+                
+            question_text = text[start_pos:end_pos].strip()
+            if question_text:
+                questions.append(question_text)
+                prev_end = end_pos
+                
+        return questions
+    
+    def _extract_question_id(self, text: str, default_index: int) -> Tuple[int, Optional[str]]:
+        """Extract question ID and Q number from text"""
+        # Look for question numbering patterns
+        q_id = None
+        q_number = None
         
-        if not option_indices:
-            logger.warning("No option blocks found, returning all blocks as one question")
-            return [blocks] if blocks else []
-        
-        question_blocks = []
-        for i, start_idx in enumerate(option_indices):
-            # Look for the block before option A, which is likely the question text
-            question_start = max(0, start_idx - 1)
+        # Pattern 1: Question X(Q.YYYY)
+        pattern1 = r'Question\s+(\d+)\s*(?:\(Q\.(\d+)\))?'
+        match1 = re.search(pattern1, text)
+        if match1:
+            q_id = int(match1.group(1))
+            q_number = match1.group(2) if match1.group(2) else str(q_id)
+            return q_id, q_number
             
-            end_idx = option_indices[i+1] - 1 if i+1 < len(option_indices) else len(blocks)
-            question_blocks.append(blocks[question_start:end_idx])
-        
-        return question_blocks
+        # Pattern 2: Q.YYYY
+        pattern2 = r'Q\.?\s*(\d+)'
+        match2 = re.search(pattern2, text)
+        if match2:
+            q_id = int(match2.group(1))
+            q_number = str(q_id)
+            return q_id, q_number
+            
+        # Pattern 3: Number at start of text
+        pattern3 = r'^(\d+)[\.\)]'
+        match3 = re.search(pattern3, text)
+        if match3:
+            q_id = int(match3.group(1))
+            q_number = str(q_id)
+            return q_id, q_number
+            
+        # No pattern matched, use default index
+        return default_index + 1, str(default_index + 1)
     
-    def _process_question_text(self, text: str, q_id: int) -> Optional[QuestionData]:
-        # Extract options with improved pattern matching
-        options = self._extract_options_from_text(text)
-        self.stats.options_found += len(options)
+    def _process_question_text(self, text: str, q_id: int) -> QuestionData:
+        """Process a question's text into a structured QuestionData object"""
+        # Clean the text
+        text = self.cleaner.clean_text(text)
         
-        # Extract option-specific explanations
-        option_explanations = self.cleaner.extract_option_explanations(text)
-        
-        # Get text without answer that might be embedded
-        text, correct_answer = self.cleaner.remove_answer_from_text(text)
-        
-        # Remove question ID pattern from beginning
+        # Remove question prefix
         text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', text)
         
-        # Extract Things to Remember section if present
-        text, things_to_remember = self._extract_things_to_remember(text)
+        # Extract correct answer
+        text, correct_answer = self.cleaner.extract_correct_answer(text)
+        
+        # Extract "Things to Remember"
+        text, things_to_remember = self.cleaner.extract_things_to_remember(text)
         
         # Extract explanation
-        text, explanation = self._extract_explanation(text)
+        text, explanation = self.cleaner.extract_explanation(text)
         
-        # Extract bidder data
-        bidder_data = self._extract_bidder_data(text)
-        if bidder_data:
-            self.stats.bidder_data_found += 1
+        # Extract options
+        options = self.cleaner.extract_options(text)
         
-        # Check for math expressions
-        contains_math = self._check_for_math(text)
-        math_expressions = []
-        if contains_math:
-            math_expressions = MathExtractor.extract_expressions(text)
-            self.stats.math_expressions_found += len(math_expressions)
-        
-        # Clean up the question text
-        question_text = self.cleaner.clean_text(text)
-        
-        if len(question_text) < MIN_QUESTION_LENGTH:
-            return None
-        
-        question = QuestionData(
-            id=q_id,
-            text=question_text,
-            options=options,
-            correct_answer=correct_answer,
-            explanation=explanation,
-            option_explanations=option_explanations,
-            things_to_remember=things_to_remember,
-            bidder_data=bidder_data,
-            has_bidder_data=bool(bidder_data),
-            contains_math=contains_math,
-            math_expressions=math_expressions
-        )
-        
-        validation_issues = self._validate_question(question)
-        if validation_issues:
-            question.validation_issues = validation_issues
-            self.stats.questions_with_issues += 1
-        
-        return question
-    
-    def _process_question_blocks(self, blocks: List[TextBlock], q_id: int) -> Optional[QuestionData]:
-        question_blocks = []
-        option_blocks = []
-        explanation_blocks = []
-        remember_blocks = []
-        table_blocks = []
-        bidder_blocks = []
-        answer_blocks = []
-        
-        for block in blocks:
-            if block.block_type == BlockType.QUESTION_ID:
-                question_blocks.append(block)
-            elif block.block_type in [BlockType.OPTION_A, BlockType.OPTION_B, BlockType.OPTION_C, 
-                                     BlockType.OPTION_D, BlockType.OPTION_E, BlockType.OPTION_F]:
-                option_blocks.append(block)
-            elif block.block_type == BlockType.EXPLANATION:
-                explanation_blocks.append(block)
-            elif block.block_type == BlockType.REMEMBER:
-                remember_blocks.append(block)
-            elif block.block_type == BlockType.TABLE:
-                table_blocks.append(block)
-            elif block.block_type == BlockType.BIDDER_DATA:
-                bidder_blocks.append(block)
-            elif block.block_type == BlockType.CORRECT_ANSWER:
-                answer_blocks.append(block)
-            elif block.block_type == BlockType.UNKNOWN:
-                if not option_blocks:
-                    question_blocks.append(block)
-        
-        question_text = ""
-        for block in question_blocks:
-            if block.block_type == BlockType.QUESTION_ID:
-                text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', block.text)
-            else:
-                text = block.text
-            question_text += " " + text
-        
-        question_text = self.cleaner.clean_text(question_text)
-        
-        options = {}
-        for block in option_blocks:
-            letter = block.metadata.get("option_letter")
-            text = block.metadata.get("option_text", "")
-            if letter and text:
-                options[letter] = self.cleaner.clean_option_text(text)
-        
-        correct_answer = None
-        for block in answer_blocks:
-            if "correct_answer" in block.metadata:
-                correct_answer = block.metadata["correct_answer"]
-                break
-        
-        if not correct_answer:
-            for block in blocks:
-                answer_match = re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)\s*([A-F])', block.text, re.IGNORECASE)
-                if answer_match:
-                    correct_answer = answer_match.group(1)
-                    break
-        
-        explanation = " ".join(block.text for block in explanation_blocks)
-        explanation = self.cleaner.clean_text(explanation)
-        
-        # Extract option-specific explanations from the explanation text
+        # Extract option-specific explanations
         option_explanations = self.cleaner.extract_option_explanations(explanation)
         
-        things_to_remember = " ".join(block.text for block in remember_blocks)
-        things_to_remember = self.cleaner.clean_text(things_to_remember)
+        # Determine if the question should be skipped
+        is_skipped = "skipped" in text.lower() or not options
         
-        bidder_data = []
-        for block in bidder_blocks:
-            if "bidders" in block.metadata:
-                bidder_data.extend(block.metadata["bidders"])
+        # The remaining text is the question statement
+        question_text = text.strip()
         
-        if not bidder_data:
-            bidder_data = self._extract_bidder_data(question_text)
-        
-        has_table = bool(table_blocks)
-        table_html = ""
-        if has_table:
-            table_html = self._generate_table_html(table_blocks)
-        
-        contains_math = any(block.metadata.get("contains_math", False) for block in blocks) or self._check_for_math(question_text)
-        
-        # Collect all math expressions from this question
-        math_expressions = []
-        if contains_math:
-            for block in blocks:
-                if block.metadata.get("contains_math", False):
-                    math_expressions.extend(block.metadata.get("math_expressions", []))
-            
-            # If no expressions found in block metadata, extract from question text
-            if not math_expressions:
-                math_expressions = MathExtractor.extract_expressions(question_text)
-        
-        question = QuestionData(
+        return QuestionData(
             id=q_id,
             text=question_text,
             options=options,
@@ -943,202 +835,35 @@ class PDFQuestionExtractor:
             explanation=explanation,
             option_explanations=option_explanations,
             things_to_remember=things_to_remember,
-            bidder_data=bidder_data,
-            has_bidder_data=bool(bidder_data),
-            table_html=table_html,
-            has_table=has_table,
-            contains_math=contains_math,
-            math_expressions=math_expressions,
-            source_blocks=blocks
+            is_skipped=is_skipped
         )
-        
-        validation_issues = self._validate_question(question)
-        if validation_issues:
-            question.validation_issues = validation_issues
-            self.stats.questions_with_issues += 1
-        
-        return question
     
-    def _extract_options_from_text(self, text: str) -> Dict[str, str]:
-        options = {}
-        
-        # Try multiple patterns to extract options
-        option_patterns = [
-            # Standard pattern with newlines
-            r'\n\s*([A-F])[\.\)]\s+(.*?)(?=\n\s*[A-F][\.\)]|\Z)',
-            # No newlines between options
-            r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\Z)',
-            # Pattern for options that might span multiple lines
-            r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\n\s*[A-F][\.\)]|\Z)'
+    def _text_might_have_table(self, text: str) -> bool:
+        """Check if text might contain a table"""
+        # Look for indications of a table
+        table_indicators = [
+            text.count("|") > 4,  # Multiple pipe characters
+            text.count("\t") > 4,  # Multiple tabs
+            text.lower().count("table") > 0,  # Explicit mention
+            re.search(r'\n\s*-{3,}', text),  # Table separators
+            re.search(r'[A-Za-z]+\s+\|\s+[A-Za-z]+', text)  # Column headings
         ]
         
-        # Try each pattern until we find options
-        for pattern in option_patterns:
-            matches = list(re.finditer(pattern, text, re.DOTALL))
-            for match in matches:
-                letter = match.group(1)
-                option_text = match.group(2).strip()
-                option_text = self.cleaner.clean_option_text(option_text)
-                if option_text:
-                    options[letter] = option_text
-            
-            # If we found options with this pattern, stop trying others
-            if options:
-                break
-        
-        return options
-    
-    def _extract_things_to_remember(self, text: str) -> Tuple[str, str]:
-        things_to_remember = ""
-        pattern = r'Things to Remember[:\s]*\n(.+)$'
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-        if match:
-            things_to_remember = match.group(1).strip()
-            text = text[:match.start()].strip()
-        else:
-            patterns = [
-                r'Things to Remember[:\s]+(.*?)(?=\n\n|\Z)',
-                r'Remember[:\s]+(.*?)(?=\n\n|\Z)',
-                r'Note[:\s]+(.*?)(?=\n\n|\Z)',
-                r'Important[:\s]+(.*?)(?=\n\n|\Z)'
-            ]
-            for pat in patterns:
-                m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
-                if m:
-                    things_to_remember = m.group(1).strip()
-                    text = text[:m.start()] + text[m.end():]
-                    break
-            text = text.strip()
-        return text, things_to_remember
-    
-    def _extract_explanation(self, text: str) -> Tuple[str, str]:
-        explanation = ""
-        patterns = [
-            r'Explanation[:\s]+(.*?)(?=\n\n|\Z)',
-            r'Therefore[:\s]+(.*?)(?=\n\n|\Z)',
-            r'Thus[:\s]+(.*?)(?=\n\n|\Z)'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                explanation = match.group(1).strip()
-                text = text[:match.start()] + text[match.end():]
-                break
-        return text, explanation
-    
-    def _extract_bidder_data(self, text: str) -> List[BidderData]:
-        bidder_data = []
-        bidder_matches = re.finditer(r'([A-G])\s+([\d,\s]+)\s+\$([\d\.]+)', text)
-        for match in bidder_matches:
-            bidder = match.group(1)
-            shares_str = match.group(2).replace(",", "").replace(" ", "")
-            price_str = match.group(3)
-            try:
-                shares = int(shares_str)
-                price = float(price_str)
-                bidder_data.append(BidderData(bidder, shares, price))
-            except ValueError:
-                continue
-        return bidder_data
-    
-    def _check_for_math(self, text: str) -> bool:
-        # Enhanced pattern to detect math content
-        math_patterns = [
-            r'\$.*?\$',                   # LaTeX inline math
-            r'\$\$.*?\$\$',               # LaTeX display math
-            r'\\begin\{equation\}.*?\\end\{equation\}',  # LaTeX equation env
-            r'[=\+\-\*\/\^\(\)]',         # Standard math operators
-            r'\d+\.\d+',                  # Decimal numbers
-            r'[αβγδεζηθικλμνξοπρστυφχψω]', # Greek letters
-            r'√|∑|∫|∂|∇|∞',               # Math symbols
-            r'\b[A-Za-z]\s*=',            # Variable assignments
-            r'log|exp|sin|cos|tan',       # Math functions
-            r'var|std|avg|mean',          # Statistical terms
-        ]
-        
-        return any(re.search(pattern, text) for pattern in math_patterns)
-    
-    def _generate_table_html(self, table_blocks: List[TextBlock]) -> str:
-        if not table_blocks:
-            return ""
-        
-        sorted_blocks = sorted(table_blocks, key=lambda b: (b.page_num, b.y0))
-        rows = []
-        
-        for block in sorted_blocks:
-            spans_by_y = defaultdict(list)
-            for span in block.spans:
-                y_key = round(span.bbox[1])
-                spans_by_y[y_key].append(span)
-            
-            sorted_y = sorted(spans_by_y.keys())
-            for y in sorted_y:
-                row = [span.text.strip() for span in sorted(spans_by_y[y], key=lambda s: s.bbox[0])]
-                if row:
-                    rows.append(row)
-        
-        if not rows:
-            return ""
-        
-        html = "<table class='quiz-table' border='1'>\n"
-        
-        # If we have a header row (likely first row)
-        if rows and any(cell.isupper() for cell in rows[0]):
-            html += "<thead>\n<tr>\n"
-            for cell in rows[0]:
-                html += f"  <th>{cell}</th>\n"
-            html += "</tr>\n</thead>\n"
-            rows = rows[1:]
-        
-        # Table body
-        html += "<tbody>\n"
-        for row in rows:
-            html += "<tr>\n"
-            for cell in row:
-                css_class = ""
-                if re.match(r'^[\d\.\$]+$', cell):
-                    css_class = " class='numeric'"
-                html += f"  <td{css_class}>{cell}</td>\n"
-            html += "</tr>\n"
-        html += "</tbody>\n"
-        html += "</table>"
-        
-        return html
-    
-    def _validate_question(self, question: QuestionData) -> List[str]:
-        issues = []
-        if not question.text.strip():
-            issues.append("Question text is empty")
-        
-        if question.options and len(question.options) < 2:
-            issues.append(f"Question has only {len(question.options)} options, should have at least 2")
-        
-        if question.correct_answer and question.options:
-            if question.correct_answer not in question.options:
-                issues.append(f"Correct answer '{question.correct_answer}' not in options")
-        
-        for letter, text in question.options.items():
-            if len(text) < 5:
-                issues.append(f"Option {letter} is very short: '{text}'")
-        
-        # Validate option explanations
-        if question.option_explanations:
-            for letter in question.option_explanations:
-                if letter not in question.options:
-                    issues.append(f"Explanation provided for option {letter} which is not in options")
-        
-        return issues
+        return any(table_indicators)
 
 class PDFProcessor:
+    """Main class for processing PDF files to extract quiz questions"""
+    
     def __init__(self, file_path: str, page_range: Optional[Tuple[int, int]] = None):
         self.file_path = file_path
         self.page_range = page_range
         self.doc = None
-        self.extractor = PDFQuestionExtractor(method=ParsingMethod.HYBRID)
+        self.extractor = PDFQuestionExtractor(method=ParsingMethod.TEXT_BASED)
         self.result = ProcessingResult()
         self.process_id = str(uuid.uuid4())[:8]
     
     def process(self) -> Dict[str, Any]:
+        """Process the PDF file and extract questions"""
         logger.info(f"Processing PDF {self.file_path} (ID: {self.process_id})")
         
         try:
@@ -1180,17 +905,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def add_cors_header(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
+# Store processing status
 processing_status = {}
 
 def update_processing_status(request_id: str, status: str, progress: float, message: str):
+    """Update the processing status for a request"""
     processing_status[request_id] = {
         "request_id": request_id,
         "status": status,
@@ -1198,32 +917,39 @@ def update_processing_status(request_id: str, status: str, progress: float, mess
         "message": message,
         "timestamp": time.time()
     }
+    
+    # Clean up old entries
     current_time = time.time()
-    keys_to_remove = []
-    for key, value in processing_status.items():
-        if current_time - value["timestamp"] > CACHE_EXPIRY:
-            keys_to_remove.append(key)
+    keys_to_remove = [k for k, v in processing_status.items() 
+                     if current_time - v["timestamp"] > CACHE_EXPIRY]
     for key in keys_to_remove:
         processing_status.pop(key, None)
 
-async def process_pdf_task(file_path: str, request_id: str, page_range: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:
+async def process_pdf_task(file_path: str, request_id: str, page_range=None):
+    """Background task for PDF processing"""
     try:
         update_processing_status(request_id, "processing", 0.1, "Starting PDF processing")
         processor = PDFProcessor(file_path, page_range)
+        
         with ThreadPoolExecutor() as executor:
             result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
-        update_processing_status(request_id, "completed", 1.0, f"Completed processing. Found {result.get('total_questions', 0)} questions")
+            
+        update_processing_status(
+            request_id, 
+            "completed", 
+            1.0, 
+            f"Completed processing. Found {result.get('total_questions', 0)} questions"
+        )
         return result
+    
     except Exception as e:
         update_processing_status(request_id, "error", 0, f"Error: {str(e)}")
-        logger.error(f"Error in background processing task: {str(e)}")
+        logger.error(f"Error in background processing: {str(e)}")
         logger.error(traceback.format_exc())
-        return {
-            "error": str(e),
-            "questions": [],
-            "total_pages": 0
-        }
+        return {"error": str(e), "questions": [], "total_pages": 0}
+    
     finally:
+        # Clean up temp file
         try:
             if os.path.exists(file_path):
                 os.unlink(file_path)
@@ -1238,26 +964,38 @@ async def handle_pdf(
     end_page: Optional[int] = Form(None),
     async_process: bool = Form(False)
 ):
+    """Process a PDF file to extract quiz questions"""
     request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id}: Processing file {file.filename}")
+    
     try:
+        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="File must be a PDF")
+        
+        # Save the uploaded file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             file_size_mb = len(content) / (1024 * 1024)
+            
             if file_size_mb > MAX_PDF_SIZE_MB:
                 raise HTTPException(
                     status_code=400, 
                     detail=f"File too large ({file_size_mb:.1f}MB). Maximum size is {MAX_PDF_SIZE_MB}MB"
                 )
+            
             tmp.write(content)
             tmp_path = tmp.name
+        
         logger.info(f"Request {request_id}: Saved to {tmp_path}")
+        
+        # Set page range if provided
         page_range = None
         if start_page is not None and end_page is not None:
             page_range = (int(start_page), int(end_page))
             logger.info(f"Request {request_id}: Using page range {page_range}")
+        
+        # Process asynchronously if requested
         if async_process:
             update_processing_status(request_id, "queued", 0.0, "PDF processing queued")
             background_tasks.add_task(process_pdf_task, tmp_path, request_id, page_range)
@@ -1267,26 +1005,33 @@ async def handle_pdf(
                 "message": "PDF processing has been queued",
                 "status_endpoint": f"/status/{request_id}"
             }
+        
+        # Process synchronously
         try:
             result = await asyncio.wait_for(
                 process_pdf_task(tmp_path, request_id, page_range),
                 timeout=DEFAULT_TIMEOUT
             )
+            
             if "error" in result and not result.get("questions", []):
                 logger.error(f"Request {request_id}: Processing error: {result['error']}")
                 raise HTTPException(status_code=500, detail=result["error"])
+            
             logger.info(f"Request {request_id}: Successfully processed {len(result.get('questions', []))} questions")
             result["request_id"] = request_id
             return result
+        
         except asyncio.TimeoutError:
             logger.error(f"Request {request_id}: Processing timed out")
             update_processing_status(request_id, "timeout", 0.0, "PDF processing timed out")
             raise HTTPException(
                 status_code=408, 
-                detail="PDF processing timed out. Please try using async_process=True for large files."
+                detail="PDF processing timed out. Try using async_process=True for large files."
             )
+    
     except HTTPException:
         raise
+    
     except Exception as e:
         logger.error(f"Request {request_id}: Error processing PDF: {str(e)}")
         logger.error(traceback.format_exc())
@@ -1294,6 +1039,7 @@ async def handle_pdf(
 
 @app.get("/status/{request_id}")
 async def get_processing_status(request_id: str):
+    """Get the status of an async processing job"""
     status = processing_status.get(request_id)
     if not status:
         raise HTTPException(status_code=404, detail=f"No status found for request ID {request_id}")
@@ -1301,13 +1047,16 @@ async def get_processing_status(request_id: str):
 
 @app.post("/pdf-info")
 async def get_pdf_info(file: UploadFile = File(...)):
+    """Get basic information about a PDF file"""
     request_id = str(uuid.uuid4())[:8]
     logger.info(f"Request {request_id}: Getting info for file {file.filename}")
+    
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
+        
         doc = fitz.open(tmp_path)
         total_pages = len(doc)
         file_size = os.path.getsize(tmp_path) / (1024 * 1024)
@@ -1319,15 +1068,20 @@ async def get_pdf_info(file: UploadFile = File(...)):
             "creator": doc.metadata.get("creator", ""),
             "producer": doc.metadata.get("producer", "")
         }
+        
+        # Estimate question count
         question_pattern = re.compile(r'(?:Question\s+\d+|Q\.\s*\d+)')
         question_count = 0
         for i in range(min(10, total_pages)):
             page_text = doc[i].get_text("text")
             matches = question_pattern.findall(page_text)
             question_count += len(matches)
-        estimated_questions = round(question_count * (total_pages / min(10, total_pages)))
+        
+        estimated_questions = round(question_count * (total_pages / max(1, min(10, total_pages))))
+        
         doc.close()
         os.unlink(tmp_path)
+        
         return {
             "total_pages": total_pages,
             "file_size_mb": round(file_size, 2),
@@ -1335,6 +1089,7 @@ async def get_pdf_info(file: UploadFile = File(...)):
             "has_toc": len(toc) > 0,
             "estimated_questions": estimated_questions
         }
+    
     except Exception as e:
         logger.error(f"Request {request_id}: Error getting PDF info: {str(e)}")
         logger.error(traceback.format_exc())
@@ -1342,24 +1097,15 @@ async def get_pdf_info(file: UploadFile = File(...)):
 
 @app.post("/quiz-submit")
 async def submit_quiz_answer(submission: QuizSubmission):
-    """Handle quiz answer submission with proper formatting"""
+    """Handle quiz answer submission and return the formatted answer display"""
     try:
-        # In a real implementation, fetch the actual question and check the answer
-        # For now, return a properly formatted example response
+        # This endpoint would normally look up the actual question in a database
+        # For now it returns a stub response
         return {
             "question_id": submission.question_id,
             "selected_answer": submission.selected_answer,
-            "correct_answer": "C",
-            "is_correct": submission.selected_answer == "C",
-            "explanation_html": """
-                The correct answer is C.
-                Issuing preferred shares that automatically convert to common shares upon a takeover attempt dilutes the voting power and ownership percentage of the acquirer, directly impacting the feasibility and attractiveness of the takeover. This is a classic example of a poison pill tactic.
-                A is incorrect. While granting a bonus to executives if the company remains independent might seem like a deterrent, it primarily serves as a retention tool rather than a structural mechanism that deters a hostile takeover.
-                B is incorrect. A staggered board system, though it prolongs the takeover process, is a governance mechanism rather than a classic poison pill.
-                D is incorrect. Creating a subsidiary to hold critical assets does not directly interfere with takeover mechanics.
-                Things to Remember:
-                A poison pill is a defensive strategy to deter hostile takeovers by diluting the shares held by potential acquirers. Examples include issuing new shares at a discount or creating share classes with enhanced voting rights. (For instance, Netflix adopted a poison pill in 2012.)
-            """
+            "correct_answer": "C", # Example
+            "is_correct": submission.selected_answer == "C"
         }
     except Exception as e:
         logger.error(f"Error processing quiz submission: {str(e)}")
@@ -1367,6 +1113,7 @@ async def submit_quiz_answer(submission: QuizSubmission):
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint"""
     import psutil
     process = psutil.Process()
     return {
@@ -1384,10 +1131,6 @@ def read_root():
         "docs_url": "/docs",
         "health_check": "/health"
     }
-
-@app.options("/{path:path}")
-async def options_route(request: Request, path: str):
-    return {}
 
 if __name__ == "__main__":
     import uvicorn
