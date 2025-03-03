@@ -1715,7 +1715,7 @@ async def get_processing_status(request_id: str):
     return status
     
 @app.head("/")
-     def head_root():
+def head_root():
     # Return an empty response with a 200 status code
       return {}
 
