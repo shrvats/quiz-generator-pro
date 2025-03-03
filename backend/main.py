@@ -1454,13 +1454,20 @@ async def get_vector_db():
 
 def update_processing_status(request_id: str, status: str, progress: float, message: str):
     """Update the processing status for a request"""
-    processing_status[request_id] = {
+    # Get existing status to preserve any stored results
+    existing = processing_status.get(request_id, {})
+    
+    # Update with new status values
+    existing.update({
         "request_id": request_id,
         "status": status,
         "progress": progress,
         "message": message,
         "timestamp": time.time()
-    }
+    })
+    
+    # Store the updated status
+    processing_status[request_id] = existing
     
     # Clean up old entries
     current_time = time.time()
@@ -1476,22 +1483,69 @@ async def process_pdf_with_storage(
     file_hash, 
     filename, 
     store_in_db=True,
-    vector_db=None
+    vector_db=None,
+    chunk_size=5
 ):
-    """Process PDF and optionally store in vector database"""
+    """Process PDF in smaller chunks to avoid timeouts"""
     try:
         update_processing_status(request_id, "processing", 0.1, "Starting PDF processing")
-        processor = PDFProcessor(file_path, page_range)
+        logger.info(f"Processing request {request_id} with chunk size {chunk_size}")
         
-        with ThreadPoolExecutor() as executor:
-            result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
+        # Get total pages in the document
+        doc = fitz.open(file_path)
+        total_pages = len(doc)
+        doc.close()
+        
+        # Define page chunks
+        start_page, end_page = page_range if page_range else (0, total_pages - 1)
+        total_range = end_page - start_page + 1
+        
+        # Process in chunks
+        all_questions = []
+        all_stats = ProcessingStats()
+        
+        for chunk_start in range(start_page, end_page + 1, chunk_size):
+            chunk_end = min(chunk_start + chunk_size - 1, end_page)
+            chunk_range = (chunk_start, chunk_end)
+            
+            progress = (chunk_start - start_page) / max(1, total_range)
+            update_processing_status(
+                request_id, 
+                "processing", 
+                progress, 
+                f"Processing pages {chunk_start}-{chunk_end} of {total_pages}"
+            )
+            logger.info(f"Request {request_id}: Processing chunk {chunk_start}-{chunk_end}")
+            
+            # Process this chunk
+            with ThreadPoolExecutor() as executor:
+                processor = PDFProcessor(file_path, chunk_range)
+                chunk_result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
+                
+                # Add questions from this chunk
+                if "questions" in chunk_result:
+                    all_questions.extend(chunk_result["questions"])
+                
+                # Merge stats
+                if "stats" in chunk_result:
+                    all_stats.questions_found += chunk_result["stats"].get("questions_found", 0)
+                    all_stats.tables_found += chunk_result["stats"].get("tables_found", 0)
+                    all_stats.math_found += chunk_result["stats"].get("math_found", 0)
+        
+        # Create final result
+        result = {
+            "questions": all_questions,
+            "total_questions": len(all_questions),
+            "total_pages": total_pages,
+            "stats": all_stats.to_dict()
+        }
         
         # Store in vector database if enabled and requested
-        if store_in_db and vector_db and result.get('questions'):
+        if store_in_db and vector_db and all_questions:
             try:
                 # Convert dict questions back to QuestionData objects
                 questions = []
-                for q_dict in result.get('questions', []):
+                for q_dict in all_questions:
                     question = QuestionData(
                         id=q_dict.get('id'),
                         text=q_dict.get('question', ''),
@@ -1506,9 +1560,17 @@ async def process_pdf_with_storage(
                 
                 # Store in DB
                 metadata = {
-                    'total_pages': result.get('total_pages', 0),
-                    'stats': result.get('stats', {})
+                    'total_pages': total_pages,
+                    'processed_chunks': f"{start_page}-{end_page} (chunk size: {chunk_size})",
+                    'stats': all_stats.to_dict()
                 }
+                
+                update_processing_status(
+                    request_id, 
+                    "storing", 
+                    0.9, 
+                    f"Storing {len(questions)} questions in database"
+                )
                 
                 success = await vector_db.store_questions(
                     questions, 
@@ -1527,43 +1589,18 @@ async def process_pdf_with_storage(
             except Exception as e:
                 logger.error(f"Error storing in vector database: {str(e)}")
                 result['stored_in_db'] = False
+                result['db_error'] = str(e)
+        
+        # Store the result in the processing status for retrieval via the results endpoint
+        status = processing_status.get(request_id, {})
+        status["results"] = result
+        processing_status[request_id] = status
         
         update_processing_status(
             request_id, 
             "completed", 
             1.0, 
-            f"Completed processing. Found {result.get('total_questions', 0)} questions"
-        )
-        return result
-    
-    except Exception as e:
-        update_processing_status(request_id, "error", 0, f"Error: {str(e)}")
-        logger.error(f"Error in background processing: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": str(e), "questions": [], "total_pages": 0}
-    
-    finally:
-        # Clean up temp file
-        try:
-            if os.path.exists(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            logger.error(f"Error cleaning up temp file: {str(e)}")
-
-async def process_pdf_task(file_path: str, request_id: str, page_range=None):
-    """Background task for PDF processing"""
-    try:
-        update_processing_status(request_id, "processing", 0.1, "Starting PDF processing")
-        processor = PDFProcessor(file_path, page_range)
-        
-        with ThreadPoolExecutor() as executor:
-            result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
-            
-        update_processing_status(
-            request_id, 
-            "completed", 
-            1.0, 
-            f"Completed processing. Found {result.get('total_questions', 0)} questions"
+            f"Completed processing. Found {len(all_questions)} questions"
         )
         return result
     
@@ -1587,11 +1624,12 @@ async def handle_pdf(
     file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
     end_page: Optional[int] = Form(None),
-    async_process: bool = Form(False),
+    async_process: bool = Form(True),  # Default to async processing
+    chunk_size: Optional[int] = Form(5),  # Process in smaller chunks
     store_in_db: bool = Form(True),
     vector_db: Optional[VectorDatabase] = Depends(get_vector_db)
 ):
-    """Process a PDF file to extract quiz questions"""
+    """Process a PDF file to extract quiz questions with chunking support"""
     request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id}: Processing file {file.filename}")
     
@@ -1604,6 +1642,7 @@ async def handle_pdf(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             file_size_mb = len(content) / (1024 * 1024)
+            logger.info(f"File size: {file_size_mb} MB")
             
             # Generate file hash for DB storage
             file_hash = hashlib.sha256(content).hexdigest()
@@ -1619,64 +1658,54 @@ async def handle_pdf(
         
         logger.info(f"Request {request_id}: Saved to {tmp_path}")
         
+        # Try to analyze PDF first to determine total pages
+        try:
+            doc = fitz.open(tmp_path)
+            total_pages = len(doc)
+            doc.close()
+            logger.info(f"Total PDF pages: {total_pages}")
+        except Exception as e:
+            logger.error(f"Error analyzing PDF: {str(e)}")
+            total_pages = 0
+        
         # Set page range if provided
-        page_range = None
         if start_page is not None and end_page is not None:
             page_range = (int(start_page), int(end_page))
             logger.info(f"Request {request_id}: Using page range {page_range}")
-        
-        # Process asynchronously if requested
-        if async_process:
-            update_processing_status(request_id, "queued", 0.0, "PDF processing queued")
-            # Modified background task function to include vector DB storage
-            background_tasks.add_task(
-                process_pdf_with_storage, 
-                tmp_path, 
-                request_id, 
-                page_range,
-                file_hash,
-                file.filename,
-                store_in_db,
-                vector_db
-            )
-            return {
-                "request_id": request_id,
-                "status": "queued",
-                "message": "PDF processing has been queued",
-                "status_endpoint": f"/status/{request_id}"
-            }
-        
-        # Process synchronously
-        try:
-            result = await asyncio.wait_for(
-                process_pdf_with_storage(
-                    tmp_path, 
-                    request_id, 
-                    page_range,
-                    file_hash,
-                    file.filename,
-                    store_in_db,
-                    vector_db
-                ),
-                timeout=DEFAULT_TIMEOUT
-            )
+        else:
+            page_range = (0, total_pages-1) if total_pages > 0 else None
             
-            if "error" in result and not result.get("questions", []):
-                logger.error(f"Request {request_id}: Processing error: {result['error']}")
-                raise HTTPException(status_code=500, detail=result["error"])
-            
-            logger.info(f"Request {request_id}: Successfully processed {len(result.get('questions', []))} questions")
-            result["request_id"] = request_id
-            return result
+        # Set initial status for progress tracking
+        update_processing_status(
+            request_id, 
+            "queued", 
+            0.0, 
+            f"PDF processing queued. Pages: {total_pages}, Size: {file_size_mb:.1f}MB"
+        )
         
-        except asyncio.TimeoutError:
-            logger.error(f"Request {request_id}: Processing timed out")
-            update_processing_status(request_id, "timeout", 0.0, "PDF processing timed out")
-            raise HTTPException(
-                status_code=408, 
-                detail="PDF processing timed out. Try using async_process=True for large files."
-            )
-    
+        # Always process asynchronously for better reliability
+        background_tasks.add_task(
+            process_pdf_with_storage, 
+            tmp_path, 
+            request_id, 
+            page_range,
+            file_hash,
+            file.filename,
+            store_in_db,
+            vector_db,
+            chunk_size
+        )
+        
+        # Return the request ID to check status
+        return {
+            "request_id": request_id,
+            "status": "queued",
+            "message": f"PDF processing has been queued. Check status at /status/{request_id}",
+            "status_endpoint": f"/status/{request_id}",
+            "total_pages": total_pages,
+            "file_size_mb": round(file_size_mb, 2)
+        }
+        
     except HTTPException:
         raise
     
@@ -1685,27 +1714,6 @@ async def handle_pdf(
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-@app.post("/search")
-async def search_similar_questions(
-    query: str = Form(...),
-    limit: int = Form(5),
-    vector_db: Optional[VectorDatabase] = Depends(get_vector_db)
-):
-    """Search for questions similar to the query"""
-    if not vector_db:
-        raise HTTPException(status_code=400, detail="Vector database is not enabled")
-    
-    try:
-        similar_questions = await vector_db.find_similar_questions(query, limit)
-        return {
-            "questions": similar_questions,
-            "total": len(similar_questions),
-            "query": query
-        }
-    except Exception as e:
-        logger.error(f"Error searching questions: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
 @app.get("/status/{request_id}")
 async def get_processing_status(request_id: str):
     """Get the status of an async processing job"""
@@ -1713,12 +1721,28 @@ async def get_processing_status(request_id: str):
     if not status:
         raise HTTPException(status_code=404, detail=f"No status found for request ID {request_id}")
     return status
-    
+
 @app.head("/")
 def head_root():
     # Return an empty response with a 200 status code
-      return {}
+    return {}
 
+@app.get("/results/{request_id}")
+async def get_processing_results(request_id: str):
+    """Get the results of a completed processing job"""
+    status = processing_status.get(request_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"No status found for request ID {request_id}")
+    
+    if status["status"] != "completed":
+        raise HTTPException(status_code=400, detail=f"Processing not completed. Current status: {status['status']}")
+    
+    # Return cached results if available
+    if "results" in status:
+        return status["results"]
+    
+    # Otherwise return just the status
+    return status
 
 @app.post("/pdf-info")
 async def get_pdf_info(file: UploadFile = File(...)):
@@ -1785,6 +1809,65 @@ async def submit_quiz_answer(submission: QuizSubmission):
     except Exception as e:
         logger.error(f"Error processing quiz submission: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process submission: {str(e)}")
+
+@app.post("/search")
+async def search_similar_questions(
+    query: str = Form(...),
+    limit: int = Form(5),
+    vector_db: Optional[VectorDatabase] = Depends(get_vector_db)
+):
+    """Search for questions similar to the query"""
+    if not vector_db:
+        raise HTTPException(status_code=400, detail="Vector database is not enabled")
+    
+    try:
+        similar_questions = await vector_db.find_similar_questions(query, limit)
+        return {
+            "questions": similar_questions,
+            "total": len(similar_questions),
+            "query": query
+        }
+    except Exception as e:
+        logger.error(f"Error searching questions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.get("/debug")
+async def debug_info():
+    """Return system information for debugging"""
+    import psutil
+    import sys
+    import platform
+    
+    # Check database connection
+    db_status = "Not checked"
+    if ENABLE_VECTOR_DB:
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(os.environ.get("DATABASE_URL", ""))
+            await conn.execute("SELECT 1")
+            await conn.close()
+            db_status = "Connected successfully"
+        except Exception as e:
+            db_status = f"Error: {str(e)}"
+    
+    # Check PDF libraries
+    pdf_libs = {
+        "PyMuPDF": hasattr(fitz, "__version__"),
+        "OCR": OCR_AVAILABLE,
+        "Tabula": TABULA_AVAILABLE,
+    }
+    
+    return {
+        "status": "running",
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "memory_usage_mb": psutil.Process().memory_info().rss / (1024 * 1024),
+        "database_status": db_status,
+        "pdf_libraries": pdf_libs,
+        "environment_vars": {k: "✓" for k in ["DATABASE_URL", "ENABLE_VECTOR_DB"] if os.environ.get(k)},
+        "cpu_usage": psutil.cpu_percent(),
+        "memory_percent": psutil.virtual_memory().percent
+    }
 
 @app.get("/health")
 async def health_check():
