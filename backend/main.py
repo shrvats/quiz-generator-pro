@@ -7,8 +7,7 @@ import os
 import asyncio
 import traceback
 import time
-import json
-from typing import List, Dict, Union, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 app = FastAPI()
 
@@ -30,297 +29,169 @@ async def add_cors_header(request: Request, call_next):
     return response
 
 # Configuration
-MAX_PROCESSING_TIME = 119  # seconds, to stay under Vercel's 60s limit
+MAX_PROCESSING_TIME = 119  # seconds
 
-def clean_text(text: str) -> str:
-    """Clean text by removing copyright notices, page numbers, etc."""
-    # Remove page numbers
-    text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
-    
-    # Remove copyright statements
-    text = re.sub(r'©\s*\d{4}.*?\n', '\n', text, flags=re.DOTALL)
-    text = re.sub(r'Copyright\s*©.*?\n', '\n', text, flags=re.DOTALL)
-    
-    # Remove standalone numbers (likely page numbers)
-    text = re.sub(r'\n\s*\d+\s*$', '\n', text, flags=re.MULTILINE)
-    
-    return text
-
-def check_time_limit(start_time: float) -> bool:
-    """Check if we're approaching the processing time limit"""
-    return time.time() - start_time > MAX_PROCESSING_TIME
-
-def extract_blocks_with_positions(doc, page_range=None) -> List[Dict]:
-    """Extract text blocks with their positions and page information"""
-    all_blocks = []
-    
-    # If page_range is provided, use it to limit extraction
+def extract_questions_from_pdf(doc, page_range=None):
+    """Extract questions and options from PDF"""
     if page_range:
         start_page, end_page = page_range
         # Adjust page range to be within document bounds
         start_page = max(0, start_page)
         end_page = min(len(doc) - 1, end_page)
-        page_iterator = range(start_page, end_page + 1)
+        pages = range(start_page, end_page + 1)
     else:
-        page_iterator = range(len(doc))
+        pages = range(len(doc))
     
-    for page_num in page_iterator:
-        page = doc[page_num]
-        # Get blocks with positions
-        blocks = page.get_text("dict")["blocks"]
-        
-        for block in blocks:
-            if "lines" not in block:
-                continue
-                
-            for line in block["lines"]:
-                if "spans" not in line:
-                    continue
-                    
-                for span in line["spans"]:
-                    # Skip empty spans
-                    if not span.get("text", "").strip():
-                        continue
-                        
-                    all_blocks.append({
-                        "page": page_num,
-                        "text": span.get("text", ""),
-                        "bbox": span.get("bbox", [0, 0, 0, 0]),
-                        "font": span.get("font", ""),
-                        "size": span.get("size", 0),
-                        "flags": span.get("flags", 0),
-                        "color": span.get("color", 0)
-                    })
-    
-    return all_blocks
-
-def is_option_marker(text: str) -> bool:
-    """Check if text is an option marker (A, B, C, D with various formats)"""
-    return bool(re.match(r'^[A-D][\.\)]|^[A-D]$', text.strip()))
-
-def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
-    """Categorize blocks into questions, options, explanations, etc."""
-    categorized = {
-        "questions": [],
-        "options": [],
-        "explanations": [],
-        "things_to_remember": [],
-        "other": []
-    }
-    
-    # First pass to identify question numbers
-    question_starts = []
-    
-    for i, block in enumerate(blocks):
-        text = block["text"].strip()
-        
-        # Check for question identifiers
-        if (re.match(r'^Q\.?\s*\d+', text) or 
-            re.match(r'^Question\s+\d+', text) or
-            re.match(r'^\d+\.\s+', text)):
-            question_starts.append(i)
-    
-    # If no question starts found, try alternative approach
-    if not question_starts:
-        for i, block in enumerate(blocks):
-            if i > 0 and is_option_marker(blocks[i]["text"]):
-                # If we find an option marker, the previous block might be a question
-                question_starts.append(i-1)
-    
-    # Second pass to categorize blocks
-    current_category = "other"
-    
-    for i, block in enumerate(blocks):
-        text = block["text"].strip()
-        
-        # Start of a new question
-        if i in question_starts:
-            current_category = "questions"
-            categorized[current_category].append(block)
-            continue
-            
-        # Check if this is an option
-        if is_option_marker(text):
-            current_category = "options"
-            categorized[current_category].append(block)
-            continue
-            
-        # Check for explanation/answer markers
-        if (re.search(r'correct answer|explanation|answer:|thus,|therefore', text, re.IGNORECASE) or
-            text.startswith("The answer is")):
-            current_category = "explanations"
-            categorized[current_category].append(block)
-            continue
-            
-        # Check for "things to remember" markers
-        if (re.search(r'remember|note:|important|tips|key points', text, re.IGNORECASE) or
-            text.startswith("Note:") or
-            text.startswith("Remember:")):
-            current_category = "things_to_remember"
-            categorized[current_category].append(block)
-            continue
-            
-        # Otherwise, continue with current category
-        categorized[current_category].append(block)
-    
-    return categorized
-
-def extract_options(blocks: List[Dict]) -> Dict[str, str]:
-    """Extract options A, B, C, D from blocks"""
-    options = {}
-    current_option = None
-    option_text = ""
-    
-    for block in blocks:
-        text = block["text"].strip()
-        
-        # Check if this is a new option marker
-        option_match = re.match(r'^([A-D])[\.\)]?\s*(.*)', text)
-        
-        if option_match:
-            # Save previous option if any
-            if current_option:
-                options[current_option] = option_text.strip()
-            
-            # Start new option
-            current_option = option_match.group(1)
-            option_text = option_match.group(2) if option_match.group(2) else ""
-        elif current_option:
-            # Continue current option
-            option_text += " " + text
-    
-    # Save the last option
-    if current_option:
-        options[current_option] = option_text.strip()
-    
-    return options
-
-def identify_questions(doc, blocks: List[Dict]) -> List[Dict]:
-    """Identify individual questions and their components"""
-    categorized = categorize_blocks(blocks)
     questions = []
+    current_question = None
+    option_letters = ["A", "B", "C", "D", "E", "F"]
     
-    # First identify question boundaries
-    question_blocks = []
-    current_question = []
-    
-    for i, block in enumerate(categorized["questions"]):
-        text = block["text"].strip()
+    for page_num in pages:
+        page = doc[page_num]
+        text = page.get_text("text")
         
-        # Check if this block starts a new question
-        is_new_question = (
-            re.match(r'^Q\.?\s*\d+', text) or 
-            re.match(r'^Question\s+\d+', text) or 
-            re.match(r'^\d+\.\s+', text)
-        )
+        # Remove page numbers and copyright notices
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+        text = re.sub(r'©.*?\n', '', text, flags=re.DOTALL)
+        text = re.sub(r'Copyright.*?\n', '', text, flags=re.DOTALL)
         
-        if is_new_question and current_question:
-            question_blocks.append(current_question)
-            current_question = [block]
-        else:
-            current_question.append(block)
-    
-    # Add the last question
-    if current_question:
-        question_blocks.append(current_question)
-    
-    # Now process each question
-    for i, blocks in enumerate(question_blocks):
-        # Extract question ID and text
-        question_text = " ".join(block["text"] for block in blocks)
-        question_id = i + 1
+        # Look for question patterns: Q.1234 or Question 1 or just 1. at beginning of line
+        question_matches = list(re.finditer(r'(?:Q\.?|Question)\s*(\d+)|\n(\d+)[\.\)]', text))
         
-        # Try to extract ID from question text
-        id_match = re.search(r'Q\.?\s*(\d+)|Question\s+(\d+)|\s*(\d+)\.\s+', question_text)
-        if id_match:
-            extracted_id = next((g for g in id_match.groups() if g), None)
-            if extracted_id:
-                question_id = int(extracted_id)
-        
-        # Extract options for this question
-        options = extract_options(categorized["options"])
-        
-        # Extract correct answer
-        correct_answer = None
-        explanation = ""
-        
-        for block in categorized["explanations"]:
-            text = block["text"].strip()
-            explanation += " " + text
+        for i, match in enumerate(question_matches):
+            question_number = match.group(1) or match.group(2)
+            start_pos = match.start()
             
-            # Try to find correct answer marker
-            answer_match = re.search(r'([A-D])\s+is\s+(?:the\s+)?correct|correct\s+answer\s+is\s+([A-D])|answer\s+is\s+([A-D])', text, re.IGNORECASE)
+            # Determine end position (next question or end of text)
+            if i < len(question_matches) - 1:
+                end_pos = question_matches[i+1].start()
+            else:
+                end_pos = len(text)
+            
+            question_text = text[start_pos:end_pos].strip()
+            
+            # Extract options
+            options = {}
+            for letter in option_letters:
+                option_pattern = rf'(?:\n|^)({letter})[\.\)]\s*(.*?)(?=\n(?:[A-F][\.\)]|\s*(?:Correct|Answer|The answer))|\Z)'
+                option_match = re.search(option_pattern, question_text, re.DOTALL)
+                if option_match:
+                    option_key = option_match.group(1)
+                    option_value = option_match.group(2).strip()
+                    options[option_key] = option_value
+            
+            # Extract correct answer if present
+            correct_answer = None
+            answer_match = re.search(r'(?:Correct answer|Answer|The answer).*?([A-F])', question_text, re.IGNORECASE)
             if answer_match:
-                for group in answer_match.groups():
-                    if group:
-                        correct_answer = group
-                        break
-        
-        # Extract things to remember
-        things_to_remember = ""
-        for block in categorized["things_to_remember"]:
-            things_to_remember += " " + block["text"].strip()
-        
-        # Extract tables for this question
-        tables = extract_tables_from_page(doc[blocks[0]["page"]])
-        
-        question = {
-            "id": question_id,
-            "question": clean_text(question_text),
-            "options": options,
-            "correct": correct_answer,
-            "explanation": explanation.strip(),
-            "things_to_remember": things_to_remember.strip(),
-            "has_table": len(tables) > 0,
-            "table_html": tables[0] if tables else None
-        }
-        
-        questions.append(question)
+                correct_answer = answer_match.group(1)
+            
+            # Extract things to remember
+            things_to_remember = ""
+            remember_match = re.search(r'(?:Remember:|Things to remember:|Note:)(.*?)(?=\n\s*[A-F][\.\)]|\Z)', 
+                                      question_text, re.DOTALL | re.IGNORECASE)
+            if remember_match:
+                things_to_remember = remember_match.group(1).strip()
+            
+            # Extract tables for this question
+            tables = extract_table_from_page(page)
+            table_html = tables[0] if tables else None
+            
+            question = {
+                "id": int(question_number),
+                "question": extract_main_question(question_text),
+                "options": options,
+                "correct": correct_answer,
+                "explanation": extract_explanation(question_text),
+                "things_to_remember": things_to_remember,
+                "has_table": bool(tables),
+                "table_html": table_html
+            }
+            
+            questions.append(question)
     
     # Sort questions by ID
     questions.sort(key=lambda q: q["id"])
     return questions
 
-def extract_tables_from_page(page) -> List[str]:
-    """Extract tables from a page and convert to HTML"""
-    tables = []
-    blocks = page.get_text("dict")["blocks"]
+def extract_main_question(text):
+    """Extract the main question text from the full text"""
+    # Remove option sections
+    for letter in ["A", "B", "C", "D", "E", "F"]:
+        text = re.sub(rf'\n{letter}[\.\)][^\n]+(\n[^\n{letter}][^\n]*)*', '', text)
     
-    for block in blocks:
-        if "lines" not in block:
-            continue
-            
-        lines_with_spans = [line for line in block["lines"] if "spans" in line]
+    # Remove answer/explanation sections
+    text = re.sub(r'\n(?:Correct answer|Answer|The answer).*', '', text, re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\nRemember:.*', '', text, re.DOTALL | re.IGNORECASE)
+    
+    # Clean up and return
+    return text.strip()
+
+def extract_explanation(text):
+    """Extract explanation from text"""
+    explanation = ""
+    explanation_match = re.search(r'(?:Correct answer|Answer|The answer)[^:]*:?\s*(.*?)(?=\n\s*Remember:|Things to remember:|\Z)', 
+                                 text, re.DOTALL | re.IGNORECASE)
+    if explanation_match:
+        explanation = explanation_match.group(1).strip()
+    return explanation
+
+def extract_table_from_page(page):
+    """Extract tables from a page"""
+    tables = []
+    page_dict = page.get_text("dict")
+    
+    # Simple approach to detect tables
+    row_counts = {}
+    max_cols = 0
+    
+    # Collect potential table rows
+    for block in page_dict["blocks"]:
+        if "lines" in block:
+            for line in block["lines"]:
+                if "spans" in line:
+                    spans = line["spans"]
+                    if len(spans) > 1:  # Potential table row
+                        y_pos = line["bbox"][1]  # vertical position
+                        row_counts[y_pos] = len(spans)
+                        max_cols = max(max_cols, len(spans))
+    
+    # If we have enough rows with multiple columns, we might have a table
+    if len(row_counts) >= 3 and max_cols >= 2:
+        # Sort rows by vertical position
+        sorted_rows = sorted(row_counts.keys())
         
-        if len(lines_with_spans) >= 3:  # At least 3 lines needed for a table
-            span_counts = [len(line["spans"]) for line in lines_with_spans]
+        # Build HTML table
+        table_data = []
+        for y_pos in sorted_rows:
+            row_data = []
+            for block in page_dict["blocks"]:
+                if "lines" in block:
+                    for line in block["lines"]:
+                        if "spans" in line and abs(line["bbox"][1] - y_pos) < 2:
+                            row_data = [span["text"] for span in line["spans"]]
+                            break
+            if row_data:
+                table_data.append(row_data)
+        
+        # Generate HTML
+        if table_data:
+            html = "<table border='1'>\n"
+            # Assume first row is header
+            html += "<tr>\n"
+            for cell in table_data[0]:
+                html += f"  <th>{cell}</th>\n"
+            html += "</tr>\n"
             
-            if max(span_counts) >= 2 and max(span_counts) - min(span_counts) <= 1:
-                table_data = []
-                
-                for line in lines_with_spans:
-                    row = [span.get("text", "").strip() for span in line["spans"]]
-                    table_data.append(row)
-                
-                # Only convert if at least one cell is non-empty
-                if any(cell.strip() for row in table_data for cell in row):
-                    html = "<table border='1'>\n"
-                    html += "<tr>\n"
-                    for cell in table_data[0]:
-                        html += f"  <th>{cell}</th>\n"
-                    html += "</tr>\n"
-                    
-                    for row in table_data[1:]:
-                        html += "<tr>\n"
-                        for cell in row:
-                            cell_class = ""
-                            if re.match(r'^[\d\.\$]+$', cell):
-                                cell_class = " align='right'"
-                            html += f"  <td{cell_class}>{cell}</td>\n"
-                        html += "</tr>\n"
-                    
-                    html += "</table>"
-                    tables.append(html)
+            # Rest are data rows
+            for row in table_data[1:]:
+                html += "<tr>\n"
+                for cell in row:
+                    html += f"  <td>{cell}</td>\n"
+                html += "</tr>\n"
+            
+            html += "</table>"
+            tables.append(html)
     
     return tables
 
@@ -331,24 +202,13 @@ def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) ->
     try:
         doc = fitz.open(file_path)
         total_pages = len(doc)
-        if page_range is None:
-            page_range = (0, total_pages - 1)
         
-        blocks = extract_blocks_with_positions(doc, page_range)
-        
-        if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during block extraction", "questions": [], "total_pages": total_pages}
-        
-        questions = identify_questions(doc, blocks)
-        
-        if check_time_limit(start_time):
-            return {"error": "Processing time limit exceeded during question processing", "questions": questions, "total_pages": total_pages}
+        questions = extract_questions_from_pdf(doc, page_range)
         
         return {
             "questions": questions,
             "total_questions": len(questions),
             "total_pages": total_pages,
-            "page_range": page_range,
             "processing_time": time.time() - start_time
         }
     
@@ -364,16 +224,10 @@ async def handle_pdf(
     end_page: Optional[int] = Form(None)
 ):
     try:
-        print(f"Received file: {file.filename}")
-        start_time = time.time()
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
-        
-        print(f"Processing file at: {tmp_path}")
-        print(f"Page range requested: {start_page} to {end_page}")
         
         page_range = None
         if start_page is not None and end_page is not None:
@@ -396,7 +250,6 @@ async def handle_pdf(
         if "error" in result and not result.get("questions", []):
             raise HTTPException(status_code=500, detail=result["error"])
             
-        print(f"Returning {result.get('total_questions', 0)} questions. Process time: {time.time() - start_time:.2f}s")
         return result
         
     except Exception as e:
