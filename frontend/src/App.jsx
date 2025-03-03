@@ -107,6 +107,51 @@ function QuizRenderer() {
     setSelectedSection(null);
     await getPdfInfo(file);
   };
+  // Replace this section in your App.jsx file (around line ~110-125)
+
+<div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+  <div>
+    <label htmlFor="startPage" style={{ display: 'block', marginBottom: '5px' }}>Start Page:</label>
+    <input 
+      type="number" 
+      id="startPage"
+      min="0"
+      max={totalPages - 1}
+      value={startPage}
+      onChange={(e) => {
+        // Add input validation to prevent NaN
+        const value = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+        // Ensure the value is a valid number
+        if (!isNaN(value)) {
+          setStartPage(Math.max(0, Math.min(value, totalPages - 1)));
+        }
+      }}
+      style={{ width: '80px', padding: '8px' }}
+    />
+  </div>
+  <div>
+    <label htmlFor="endPage" style={{ display: 'block', marginBottom: '5px' }}>End Page:</label>
+    <input 
+      type="number" 
+      id="endPage"
+      min={startPage}
+      max={totalPages - 1}
+      value={endPage}
+      onChange={(e) => {
+        // Add input validation to prevent NaN
+        const value = e.target.value === '' ? startPage : parseInt(e.target.value, 10);
+        // Ensure the value is a valid number and within range
+        if (!isNaN(value)) {
+          setEndPage(Math.max(startPage, Math.min(value, totalPages - 1)));
+        }
+      }}
+      style={{ width: '80px', padding: '8px' }}
+    />
+  </div>
+  <div style={{ marginTop: '24px', color: '#666' }}>
+    (Processing {pageRangeEnabled ? (endPage - startPage + 1) : totalPages} pages)
+  </div>
+</div>
 
   const processPdf = async () => {
     if (!selectedFile) {
