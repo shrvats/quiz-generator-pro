@@ -1,46 +1,102 @@
-from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-import fitz  # PyMuPDF
+#!/usr/bin/env python3
+"""
+PDF Quiz Parser - Production-level implementation
+A robust PDF parsing system to extract quiz questions from various PDF formats.
+
+Author: Quiz Parser Team
+Version: 1.0.0
+"""
+
 import re
-import tempfile
 import os
-import asyncio
-import traceback
+import sys
 import time
 import json
-import logging
 import uuid
+import hashlib
+import logging
+import tempfile
+import traceback
+from enum import Enum, auto
+from typing import List, Dict, Tuple, Optional, Any, Union, Set, NamedTuple
+from dataclasses import dataclass, field, asdict
+from collections import defaultdict, Counter
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+import fitz  # PyMuPDF
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional, Tuple, Any, Union, Set
-from enum import Enum, auto
-from collections import defaultdict, Counter
-from dataclasses import dataclass, field, asdict
-import hashlib
+from fastapi import FastAPI, UploadFile, HTTPException, Request, File, Form, BackgroundTasks, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
 
-# Configure logging
+# Setup logging
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format=LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("quiz_parser.log")
+    ]
 )
 logger = logging.getLogger("quiz-pdf-parser")
 
+# Constants
+MAX_PROCESSING_TIME = 120  # seconds
+MAX_RETRIES = 3
+DEFAULT_TIMEOUT = 55  # seconds
+SUPPORTED_LANGUAGES = ["en", "fr", "es", "de"]  # supported languages for text extraction
+MIN_QUESTION_LENGTH = 10  # minimum length for valid question text
+MAX_PDF_SIZE_MB = 100  # maximum PDF size in MB
+CACHE_EXPIRY = 3600  # cache expiry in seconds
+MAX_PARALLEL_REQUESTS = 5  # maximum parallel requests
+
+
+###############################
+# Data Models and Structures  #
+###############################
+
 class BlockType(Enum):
-    """Enum for block types to ensure consistent classification"""
+    """Enum for different types of text blocks found in PDFs"""
     UNKNOWN = auto()
     QUESTION_ID = auto()
     QUESTION_TEXT = auto()
-    OPTION = auto()
-    EXPLANATION = auto()
+    OPTION_A = auto()
+    OPTION_B = auto()
+    OPTION_C = auto()
+    OPTION_D = auto()
+    OPTION_E = auto()
+    OPTION_F = auto()
     CORRECT_ANSWER = auto()
+    EXPLANATION = auto()
     REMEMBER = auto()
-    TABLE_HEADER = auto()
-    TABLE_ROW = auto()
     COPYRIGHT = auto()
     PAGE_NUMBER = auto()
-    SKIP = auto()
+    HEADER = auto()
+    FOOTER = auto()
+    TABLE = auto()
     BIDDER_DATA = auto()
+    MATH = auto()
+
+class QuestionType(Enum):
+    """Enum for different types of questions"""
+    MULTIPLE_CHOICE = auto()
+    TRUE_FALSE = auto()
+    FILL_IN_BLANK = auto()
+    MATCHING = auto()
+    CALCULATION = auto()
+    FINANCIAL = auto()
+    ESSAY = auto()
+    UNKNOWN = auto()
+
+class ParsingMethod(Enum):
+    """Enum for different parsing methods"""
+    TEXT_BASED = auto()
+    BLOCK_BASED = auto()
+    HYBRID = auto()
+    OCR = auto()
 
 @dataclass
 class TextSpan:
@@ -83,14 +139,22 @@ class TextBlock:
 
 @dataclass
 class BidderData:
-    """Structured data for bidder information"""
+    """Structured data for bidder information in financial questions"""
     bidder: str
     shares: int
     price: float
 
 @dataclass
+class QuestionOption:
+    """Represents a single option (A, B, C, D, etc.) in a question"""
+    letter: str
+    text: str
+    is_correct: bool = False
+    explanation: str = ""
+
+@dataclass
 class QuestionData:
-    """Full question data structure"""
+    """Full question data structure with all components"""
     id: int
     text: str = ""
     options: Dict[str, str] = field(default_factory=dict)
@@ -101,7 +165,11 @@ class QuestionData:
     table_html: str = ""
     has_table: bool = False
     has_bidder_data: bool = False
+    type: QuestionType = QuestionType.MULTIPLE_CHOICE
     source_blocks: List[TextBlock] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    validation_issues: List[str] = field(default_factory=list)
+    contains_math: bool = False
     
     @property
     def has_options(self) -> bool:
@@ -117,6 +185,7 @@ class QuestionData:
             "explanation": self.explanation,
             "things_to_remember": self.things_to_remember,
             "has_options": self.has_options,
+            "type": self.type.name,
         }
         
         if self.has_bidder_data:
@@ -129,105 +198,302 @@ class QuestionData:
         if self.has_table:
             result["table_html"] = self.table_html
             result["has_table"] = True
+        
+        if self.contains_math:
+            result["contains_math"] = True
+            
+        if self.validation_issues:
+            result["validation_issues"] = self.validation_issues
             
         return result
 
-class PDFParser:
-    """Production-level PDF parser with robust error handling"""
+class ParsingStatistics:
+    """Statistics about the parsing process"""
+    def __init__(self):
+        self.start_time = time.time()
+        self.total_pages = 0
+        self.processed_pages = 0
+        self.total_blocks = 0
+        self.questions_found = 0
+        self.options_found = 0
+        self.tables_found = 0
+        self.math_expressions_found = 0
+        self.bidder_data_found = 0
+        self.questions_with_issues = 0
+        self.errors = []
+        self.warnings = []
+        
+    def elapsed_time(self) -> float:
+        return time.time() - self.start_time
     
-    def __init__(self, file_path: str, page_range: Optional[Tuple[int, int]] = None):
-        self.file_path = file_path
-        self.page_range = page_range
-        self.doc = None
-        self.blocks: List[TextBlock] = []
-        self.questions: List[QuestionData] = []
-        self.parser_id = str(uuid.uuid4())[:8]
-        self.stats = {
-            "total_pages": 0,
-            "processed_pages": 0,
-            "total_blocks": 0,
-            "questions_found": 0,
-            "processing_time": 0
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "elapsed_time_seconds": self.elapsed_time(),
+            "total_pages": self.total_pages,
+            "processed_pages": self.processed_pages,
+            "total_blocks": self.total_blocks,
+            "questions_found": self.questions_found,
+            "options_found": self.options_found,
+            "tables_found": self.tables_found,
+            "math_expressions_found": self.math_expressions_found,
+            "bidder_data_found": self.bidder_data_found,
+            "questions_with_issues": self.questions_with_issues,
+            "errors": self.errors,
+            "warnings": self.warnings
+        }
+
+class ProcessingResult:
+    """Result of processing a PDF file"""
+    def __init__(self, questions=None, total_pages=0, error=None):
+        self.questions = questions or []
+        self.total_pages = total_pages
+        self.error = error
+        self.stats = ParsingStatistics()
+        
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "questions": [q.to_dict() for q in self.questions],
+            "total_questions": len(self.questions),
+            "total_pages": self.total_pages,
+            "stats": self.stats.to_dict()
         }
         
-        # Regex patterns for better maintainability
-        self.patterns = {
-            "question_id": r'(?:Question\s+(\d+)(?:\(Q\.(\d+)\))?|Q\.?\s*(\d+)(?:\(Q\.(\d+)\))?)',
-            "option": r'^([A-F])[\.\)]\s+(.*?)$',
-            "correct_answer": r'(?:The correct answer is|Correct answer[:\s]+|The answer is|Answer:\s*)([A-F])\.?',
-            "copyright": r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?',
-            "page_number": r'^\s*\d+\s*$',
-            "bidder_data": r'([A-G])\s+([\d,\s]+)\s+\$([\d\.]+)',
-            "remember": r'(?:Things to Remember|Remember:|Note:)',
-            "explanation": r'(?:Explanation:|Therefore:|Thus,)',
-            "choice_incorrect": r'Choice\s+([A-F])\s+is\s+incorrect\.',
-            "choice_correct": r'Choice\s+([A-F])\s+is\s+correct\.'
-        }
-        
-    def __enter__(self):
-        """Context manager entry"""
-        self.doc = fitz.open(self.file_path)
-        self.stats["total_pages"] = len(self.doc)
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
-        if self.doc:
-            self.doc.close()
+        if self.error:
+            result["error"] = str(self.error)
+            
+        return result
+
+# API Models
+class PDFInfoResponse(BaseModel):
+    """Model for PDF info response"""
+    total_pages: int
+    file_size_mb: float
+    metadata: Dict[str, str]
+    estimated_questions: int = 0
+    has_toc: bool = False
+    language: str = "en"
     
-    def process(self) -> Dict[str, Any]:
-        """Main processing method"""
-        start_time = time.time()
-        
-        try:
-            # Extract blocks from PDF
-            self.extract_blocks()
-            
-            # Classify blocks
-            self.classify_blocks()
-            
-            # Group blocks into questions
-            self.group_questions()
-            
-            # Process each question
-            self.process_questions()
-            
-            # Track processing time
-            self.stats["processing_time"] = time.time() - start_time
-            
-            # Return results
-            return {
-                "questions": [q.to_dict() for q in self.questions],
-                "total_questions": len(self.questions),
-                "total_pages": self.stats["total_pages"],
-                "stats": self.stats
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing PDF: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {
-                "error": f"Failed to process PDF: {str(e)}",
-                "questions": [],
-                "total_pages": self.stats.get("total_pages", 0)
-            }
+class ProcessingStatus(BaseModel):
+    """Model for processing status updates"""
+    request_id: str
+    status: str
+    progress: float
+    message: str
+    timestamp: float = Field(default_factory=time.time)
+
+class HealthResponse(BaseModel):
+    """Model for health check response"""
+    status: str
+    version: str
+    uptime: float
+    memory_usage_mb: float
     
-    def extract_blocks(self):
-        """Extract blocks from PDF with position and style information"""
-        # Determine page range
-        if self.page_range:
-            start_page, end_page = self.page_range
+
+###################################
+#  PDF Processing Core Classes    #
+###################################
+
+class PDFTextCleaner:
+    """A class for cleaning text extracted from PDFs"""
+    
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """Clean text by removing copyright notices, page numbers, etc."""
+        # Remove copyright statements
+        text = re.sub(r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?.*?(?=\n|$)', '', text, flags=re.IGNORECASE)
+        
+        # Remove page numbers
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+        text = re.sub(r'^[ \t]*\d+[ \t]*$', '', text, flags=re.MULTILINE)
+        
+        # Remove any isolated numbers that might be page numbers
+        text = re.sub(r'\n\s*\d+\s*$', '\n', text, flags=re.MULTILINE)
+        
+        # Clean up any duplicate spaces and newlines
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove any "Choice X is incorrect/correct" statements
+        text = re.sub(r'Choice\s+[A-F]\s+is\s+(?:in)?correct\..*?(?=\n|$)', '', text, flags=re.IGNORECASE)
+        
+        return text.strip()
+    
+    @staticmethod
+    def remove_answer_from_text(text: str) -> Tuple[str, Optional[str]]:
+        """Remove answer information from text and return clean text and answer"""
+        correct_answer = None
+        
+        # Patterns for answer statements
+        patterns = [
+            r'The correct answer is ([A-F])\..*?(?=\n|$)',
+            r'Correct answer[:\s]+([A-F])\.?.*?(?=\n|$)',
+            r'The answer is ([A-F])\.?.*?(?=\n|$)',
+            r'Answer[:\s]+([A-F])\.?.*?(?=\n|$)',
+            r'The correct choice is ([A-F])\.?.*?(?=\n|$)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                correct_answer = match.group(1)
+                # Remove the answer text
+                text = text[:match.start()] + text[match.end():]
+                break
+        
+        return text, correct_answer
+    
+    @staticmethod
+    def clean_option_text(text: str) -> str:
+        """Clean option text by removing answer indicators"""
+        # Remove answer indicators
+        text = re.sub(r'(?:is correct|correct answer|is incorrect).*', '', text, flags=re.IGNORECASE)
+        
+        # Remove copyright notices
+        text = re.sub(r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?.*?(?=\n|$)', '', text, flags=re.IGNORECASE)
+        
+        return text.strip()
+
+class PDFQuestionExtractor:
+    """Extracts questions from PDF documents using multiple strategies"""
+    
+    def __init__(self, method: ParsingMethod = ParsingMethod.HYBRID):
+        self.method = method
+        self.cleaner = PDFTextCleaner()
+        self.stats = ParsingStatistics()
+        
+    def extract_from_document(self, doc, page_range=None) -> List[QuestionData]:
+        """Extract questions from PDF document"""
+        self.stats = ParsingStatistics()
+        self.stats.total_pages = len(doc)
+        
+        if page_range:
+            start_page, end_page = page_range
             start_page = max(0, start_page)
-            end_page = min(len(self.doc) - 1, end_page)
-            pages = range(start_page, end_page + 1)
+            end_page = min(len(doc) - 1, end_page)
+            page_iterator = range(start_page, end_page + 1)
         else:
-            pages = range(len(self.doc))
+            page_iterator = range(len(doc))
+            
+        self.stats.processed_pages = len(page_iterator)
         
-        self.stats["processed_pages"] = len(pages)
+        if self.method == ParsingMethod.TEXT_BASED:
+            return self._extract_text_based(doc, page_iterator)
+        elif self.method == ParsingMethod.BLOCK_BASED:
+            return self._extract_block_based(doc, page_iterator)
+        else:  # Use hybrid method
+            # Try block-based first
+            try:
+                questions = self._extract_block_based(doc, page_iterator)
+                if questions:
+                    return questions
+            except Exception as e:
+                logger.warning(f"Block-based extraction failed: {str(e)}, falling back to text-based")
+                
+            # Fallback to text-based
+            return self._extract_text_based(doc, page_iterator)
+    
+    def _extract_text_based(self, doc, page_iterator) -> List[QuestionData]:
+        """Extract questions using text-based approach"""
+        all_text = ""
         
-        # Extract blocks from each page
-        for page_num in pages:
-            page = self.doc[page_num]
+        # Extract text from all pages
+        for page_num in page_iterator:
+            page = doc[page_num]
+            page_text = page.get_text("text")
+            all_text += page_text + "\n"
+        
+        # Find all question numbers and their positions
+        question_pattern = r'(?:Question\s+(\d+)(?:\(Q\.(\d+)\))?|Q\.?\s*(\d+)(?:\(Q\.(\d+)\))?)'
+        question_matches = list(re.finditer(question_pattern, all_text))
+        
+        # Track statistics
+        self.stats.questions_found = len(question_matches)
+        
+        # If no questions found, try alternate patterns
+        if not question_matches:
+            # Try numbered list pattern (1. 2. 3. etc)
+            alternate_pattern = r'\n\s*(\d+)[\.\)]\s+'
+            alternate_matches = list(re.finditer(alternate_pattern, all_text))
+            if alternate_matches:
+                question_matches = alternate_matches
+                self.stats.questions_found = len(alternate_matches)
+                self.stats.warnings.append("Used alternate question numbering pattern")
+        
+        # Process each question
+        questions = []
+        
+        for i, match in enumerate(question_matches):
+            try:
+                # Get question ID
+                q_id = None
+                for group in match.groups() or []:
+                    if group:
+                        q_id = group
+                        break
+                
+                if not q_id and match.group(0):
+                    # Extract from match directly if groups failed
+                    q_id_match = re.search(r'\d+', match.group(0))
+                    if q_id_match:
+                        q_id = q_id_match.group(0)
+                
+                if not q_id:
+                    q_id = str(i + 1)
+                
+                # Define text boundaries for this question
+                start_pos = match.start()
+                if i < len(question_matches) - 1:
+                    end_pos = question_matches[i+1].start()
+                else:
+                    end_pos = len(all_text)
+                
+                # Extract question text
+                question_text = all_text[start_pos:end_pos]
+                
+                # Process question
+                question_data = self._process_question_text(question_text, int(q_id))
+                if question_data and question_data.text:
+                    questions.append(question_data)
+                    
+            except Exception as e:
+                logger.error(f"Error processing question {i+1}: {str(e)}")
+                self.stats.errors.append(f"Error processing question {i+1}: {str(e)}")
+        
+        return questions
+    
+    def _extract_block_based(self, doc, page_iterator) -> List[QuestionData]:
+        """Extract questions using block-based approach"""
+        # Extract blocks from document
+        blocks = self._extract_blocks(doc, page_iterator)
+        self.stats.total_blocks = len(blocks)
+        
+        # Classify blocks
+        classified_blocks = self._classify_blocks(blocks)
+        
+        # Identify question boundaries
+        question_blocks = self._group_blocks_by_question(classified_blocks)
+        self.stats.questions_found = len(question_blocks)
+        
+        # Process each question
+        questions = []
+        
+        for i, q_blocks in enumerate(question_blocks):
+            try:
+                q_id = q_blocks[0].metadata.get("question_id") if q_blocks else i + 1
+                question_data = self._process_question_blocks(q_blocks, q_id)
+                if question_data and question_data.text:
+                    questions.append(question_data)
+            except Exception as e:
+                logger.error(f"Error processing question from blocks {i+1}: {str(e)}")
+                self.stats.errors.append(f"Error processing question from blocks {i+1}: {str(e)}")
+        
+        return questions
+    
+    def _extract_blocks(self, doc, page_iterator) -> List[TextBlock]:
+        """Extract text blocks from PDF pages"""
+        blocks = []
+        
+        for page_num in page_iterator:
+            page = doc[page_num]
             page_dict = page.get_text("dict")
             
             for block in page_dict["blocks"]:
@@ -259,287 +525,410 @@ class PDFParser:
                 
                 # Only add blocks with content
                 if text_block.spans:
-                    self.blocks.append(text_block)
+                    blocks.append(text_block)
         
-        self.stats["total_blocks"] = len(self.blocks)
-        logger.info(f"Extracted {len(self.blocks)} blocks from {len(pages)} pages")
+        return blocks
     
-    def classify_blocks(self):
+    def _classify_blocks(self, blocks: List[TextBlock]) -> List[TextBlock]:
         """Classify blocks by content type"""
-        for block in self.blocks:
+        for block in blocks:
             text = block.text
             
+            # Skip empty blocks
+            if not text.strip():
+                continue
+            
             # Check for copyright notices or page numbers
-            if re.search(self.patterns["copyright"], text, re.IGNORECASE):
+            if re.search(r'(?:©|Copyright\s*©?)\s*\d{4}', text, re.IGNORECASE):
                 block.block_type = BlockType.COPYRIGHT
                 continue
             
-            if re.match(self.patterns["page_number"], text):
+            if re.match(r'^\s*\d+\s*$', text):
                 block.block_type = BlockType.PAGE_NUMBER
                 continue
             
             # Check for question IDs
-            if re.match(self.patterns["question_id"], text):
+            if re.match(r'(?:Question\s+\d+|Q\.\s*\d+)', text):
                 block.block_type = BlockType.QUESTION_ID
                 # Extract question ID
-                q_id_match = re.match(self.patterns["question_id"], text)
+                q_id_match = re.search(r'\d+', text)
                 if q_id_match:
-                    # Get first non-None group
-                    q_id = next((g for g in q_id_match.groups() if g), "0")
-                    block.metadata["question_id"] = int(q_id)
+                    block.metadata["question_id"] = int(q_id_match.group(0))
                 continue
             
             # Check for options (A. B. C. etc.)
-            option_match = re.match(self.patterns["option"], text, re.DOTALL)
+            option_match = re.match(r'^([A-F])[\.\)]\s+(.*)', text, re.DOTALL)
             if option_match:
-                block.block_type = BlockType.OPTION
-                block.metadata["option_letter"] = option_match.group(1)
-                block.metadata["option_text"] = option_match.group(2).strip()
+                letter = option_match.group(1)
+                option_text = option_match.group(2).strip()
+                
+                if letter == 'A':
+                    block.block_type = BlockType.OPTION_A
+                elif letter == 'B':
+                    block.block_type = BlockType.OPTION_B
+                elif letter == 'C':
+                    block.block_type = BlockType.OPTION_C
+                elif letter == 'D':
+                    block.block_type = BlockType.OPTION_D
+                elif letter == 'E':
+                    block.block_type = BlockType.OPTION_E
+                elif letter == 'F':
+                    block.block_type = BlockType.OPTION_F
+                
+                block.metadata["option_letter"] = letter
+                block.metadata["option_text"] = option_text
+                self.stats.options_found += 1
                 continue
             
             # Check for correct answer indicators
-            if re.search(self.patterns["correct_answer"], text, re.IGNORECASE):
+            if re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)', text, re.IGNORECASE):
                 block.block_type = BlockType.CORRECT_ANSWER
-                answer_match = re.search(self.patterns["correct_answer"], text, re.IGNORECASE)
+                answer_match = re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)\s*([A-F])', text, re.IGNORECASE)
                 if answer_match:
-                    block.metadata["answer"] = answer_match.group(1)
+                    block.metadata["correct_answer"] = answer_match.group(1)
                 continue
             
             # Check for "things to remember" blocks
-            if re.search(self.patterns["remember"], text, re.IGNORECASE):
+            if re.search(r'(?:Things to Remember|Remember:|Note:)', text, re.IGNORECASE):
                 block.block_type = BlockType.REMEMBER
                 continue
             
             # Check for explanation blocks
-            if re.search(self.patterns["explanation"], text, re.IGNORECASE):
+            if re.search(r'(?:Explanation:|Therefore:|Thus:)', text, re.IGNORECASE):
                 block.block_type = BlockType.EXPLANATION
                 continue
             
-            # Check for "Choice X is correct/incorrect" blocks
-            choice_incorrect = re.search(self.patterns["choice_incorrect"], text, re.IGNORECASE)
-            choice_correct = re.search(self.patterns["choice_correct"], text, re.IGNORECASE)
-            if choice_incorrect or choice_correct:
-                block.block_type = BlockType.EXPLANATION
-                if choice_correct:
-                    block.metadata["correct_option"] = choice_correct.group(1)
+            # Check for table-like structure
+            if len(block.spans) >= 3 and len(set(span.y0 for span in block.spans)) >= 3:
+                # At least 3 rows (different y positions)
+                block.block_type = BlockType.TABLE
+                self.stats.tables_found += 1
                 continue
             
             # Check for bidder data
-            bidder_matches = list(re.finditer(self.patterns["bidder_data"], text))
+            bidder_matches = list(re.finditer(r'([A-G])\s+([\d,\s]+)\s+\$([\d\.]+)', text))
             if len(bidder_matches) >= 2:  # At least 2 bidders
                 block.block_type = BlockType.BIDDER_DATA
                 bidders = []
                 for match in bidder_matches:
                     bidder = match.group(1)
-                    shares = int(match.group(2).replace(",", "").replace(" ", ""))
-                    price = float(match.group(3))
-                    bidders.append(BidderData(bidder, shares, price))
-                block.metadata["bidders"] = bidders
+                    shares_str = match.group(2).replace(",", "").replace(" ", "")
+                    price_str = match.group(3)
+                    
+                    try:
+                        shares = int(shares_str)
+                        price = float(price_str)
+                        bidders.append(BidderData(bidder, shares, price))
+                    except ValueError:
+                        pass
+                        
+                if bidders:
+                    block.metadata["bidders"] = bidders
+                    self.stats.bidder_data_found += 1
                 continue
             
-            # If no special type detected, keep as UNKNOWN
-            # Will be assigned later during question grouping
+            # Check for math expressions
+            if re.search(r'[=\+\-\*\/\^\(\)]|√|∑|∫|∂|∇|∞|\b[A-Za-z]\s*=', text):
+                block.metadata["contains_math"] = True
+                self.stats.math_expressions_found += 1
+        
+        return blocks
     
-    def group_questions(self):
+    def _group_blocks_by_question(self, blocks: List[TextBlock]) -> List[List[TextBlock]]:
         """Group blocks into questions based on question IDs"""
-        # First, find all question ID blocks
+        # Find all question ID blocks
         question_starts = []
-        for i, block in enumerate(self.blocks):
+        for i, block in enumerate(blocks):
             if block.block_type == BlockType.QUESTION_ID:
                 question_starts.append(i)
         
+        # If no questions found, try to identify by options
         if not question_starts:
-            logger.warning("No question ID blocks found")
-            return
+            current_option = None
+            for i, block in enumerate(blocks):
+                if block.block_type in [BlockType.OPTION_A, BlockType.OPTION_B, BlockType.OPTION_C, 
+                                       BlockType.OPTION_D, BlockType.OPTION_E, BlockType.OPTION_F]:
+                    option_letter = block.metadata.get("option_letter")
+                    
+                    # A new question starts at option A
+                    if option_letter == 'A' and current_option != 'A':
+                        question_starts.append(i-1 if i > 0 else 0)  # Question is likely before option A
+                        
+                    current_option = option_letter
+        
+        if not question_starts:
+            logger.warning("No question boundaries found")
+            return []
         
         # Group blocks by question
+        question_blocks = []
         for i, start_idx in enumerate(question_starts):
-            end_idx = question_starts[i+1] if i+1 < len(question_starts) else len(self.blocks)
-            
-            # Get blocks for this question
-            question_blocks = self.blocks[start_idx:end_idx]
-            
-            # Skip if no blocks (should never happen)
-            if not question_blocks:
-                continue
-            
-            # Get question ID
-            q_id_block = question_blocks[0]
-            q_id = q_id_block.metadata.get("question_id", i+1)
-            
-            # Create question data
-            question = QuestionData(
-                id=q_id,
-                source_blocks=question_blocks
-            )
-            
-            # Add to questions list
-            self.questions.append(question)
+            end_idx = question_starts[i+1] if i+1 < len(question_starts) else len(blocks)
+            question_blocks.append(blocks[start_idx:end_idx])
         
-        self.stats["questions_found"] = len(self.questions)
-        logger.info(f"Found {len(self.questions)} questions")
+        return question_blocks
     
-    def process_questions(self):
-        """Process each question to extract text, options, etc."""
-        for question in self.questions:
-            try:
-                # Process this question
-                self._process_question(question)
-            except Exception as e:
-                logger.error(f"Error processing question {question.id}: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Try fallback processing to save what we can
-                self._process_question_fallback(question)
-    
-    def _process_question(self, question: QuestionData):
-        """Process a single question with sophisticated analysis"""
-        blocks = question.source_blocks
+    def _process_question_text(self, text: str, q_id: int) -> Optional[QuestionData]:
+        """Process a question from its text"""
+        # 1. Extract options first
+        options = self._extract_options_from_text(text)
+        self.stats.options_found += len(options)
         
-        # Extract question text
-        question_text_blocks = []
-        for i, block in enumerate(blocks):
-            # Take blocks after question ID until first option or explanation
-            if i == 0 and block.block_type == BlockType.QUESTION_ID:
-                continue
-            
-            if block.block_type in [BlockType.OPTION, BlockType.EXPLANATION, 
-                                   BlockType.CORRECT_ANSWER, BlockType.REMEMBER]:
-                break
-            
-            if block.block_type not in [BlockType.COPYRIGHT, BlockType.PAGE_NUMBER]:
-                question_text_blocks.append(block)
+        # 2. Extract correct answer and clean text
+        text, correct_answer = self.cleaner.remove_answer_from_text(text)
         
-        # Extract question text
-        question.text = self._clean_text(" ".join(block.text for block in question_text_blocks))
+        # 3. Remove question ID from text
+        text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', text)
         
-        # Check for bidder data in question text
-        bidder_data = self._extract_bidder_data_from_text(question.text)
+        # 4. Extract "things to remember" if present
+        text, things_to_remember = self._extract_things_to_remember(text)
+        
+        # 5. Extract explanation if present
+        text, explanation = self._extract_explanation(text)
+        
+        # 6. Extract bidder data if present
+        bidder_data = self._extract_bidder_data(text)
         if bidder_data:
-            question.bidder_data = bidder_data
-            question.has_bidder_data = True
+            self.stats.bidder_data_found += 1
+        
+        # 7. Check for math content
+        contains_math = self._check_for_math(text)
+        if contains_math:
+            self.stats.math_expressions_found += 1
+        
+        # 8. Clean and trim final question text
+        question_text = self.cleaner.clean_text(text)
+        
+        # Skip if question text is too short
+        if len(question_text) < MIN_QUESTION_LENGTH:
+            return None
+        
+        # Create question object
+        question = QuestionData(
+            id=q_id,
+            text=question_text,
+            options=options,
+            correct_answer=correct_answer,
+            explanation=explanation,
+            things_to_remember=things_to_remember,
+            bidder_data=bidder_data,
+            has_bidder_data=bool(bidder_data),
+            contains_math=contains_math
+        )
+        
+        # Validate the question
+        validation_issues = self._validate_question(question)
+        if validation_issues:
+            question.validation_issues = validation_issues
+            self.stats.questions_with_issues += 1
+        
+        return question
+    
+    def _process_question_blocks(self, blocks: List[TextBlock], q_id: int) -> Optional[QuestionData]:
+        """Process a question from its blocks"""
+        if not blocks:
+            return None
             
-            # Remove bidder data from question text
-            for bidder in bidder_data:
-                pattern = f"{bidder.bidder}\\s+{bidder.shares:,}\\s+\\${bidder.price}"
-                question.text = re.sub(pattern, "", question.text, flags=re.IGNORECASE)
+        # Separate blocks by type
+        question_blocks = []
+        option_blocks = []
+        explanation_blocks = []
+        remember_blocks = []
+        table_blocks = []
+        bidder_blocks = []
+        answer_blocks = []
+        
+        for block in blocks:
+            if block.block_type == BlockType.QUESTION_ID:
+                question_blocks.append(block)
+            elif block.block_type in [BlockType.OPTION_A, BlockType.OPTION_B, BlockType.OPTION_C,
+                                     BlockType.OPTION_D, BlockType.OPTION_E, BlockType.OPTION_F]:
+                option_blocks.append(block)
+            elif block.block_type == BlockType.EXPLANATION:
+                explanation_blocks.append(block)
+            elif block.block_type == BlockType.REMEMBER:
+                remember_blocks.append(block)
+            elif block.block_type == BlockType.TABLE:
+                table_blocks.append(block)
+            elif block.block_type == BlockType.BIDDER_DATA:
+                bidder_blocks.append(block)
+            elif block.block_type == BlockType.CORRECT_ANSWER:
+                answer_blocks.append(block)
+            elif block.block_type == BlockType.UNKNOWN:
+                # Unknown blocks might be part of question text
+                # Only add if it appears before any options
+                if not option_blocks:
+                    question_blocks.append(block)
+        
+        # Extract question text
+        question_text = ""
+        for block in question_blocks:
+            if block.block_type == BlockType.QUESTION_ID:
+                # Remove question ID
+                text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', block.text)
+            else:
+                text = block.text
                 
-            # Also try to remove the whole bidder table
-            bidder_section = re.search(r'Bidder.*?(?=\n|$)', question.text, re.IGNORECASE | re.DOTALL)
-            if bidder_section:
-                question.text = question.text[:bidder_section.start()].strip()
+            question_text += " " + text
+        
+        question_text = self.cleaner.clean_text(question_text)
         
         # Extract options
         options = {}
-        for block in blocks:
-            if block.block_type == BlockType.OPTION:
-                option_letter = block.metadata.get("option_letter")
-                option_text = block.metadata.get("option_text")
-                if option_letter and option_text:
-                    options[option_letter] = self._clean_text(option_text)
-        
-        # If no options were found, try alternative extraction
-        if not options:
-            options = self._extract_options_alternative(blocks, question.text)
-        
-        question.options = options
+        for block in option_blocks:
+            letter = block.metadata.get("option_letter")
+            text = block.metadata.get("option_text", "")
+            if letter and text:
+                options[letter] = self.cleaner.clean_option_text(text)
         
         # Extract correct answer
         correct_answer = None
-        for block in blocks:
-            if block.block_type == BlockType.CORRECT_ANSWER:
-                correct_answer = block.metadata.get("answer")
+        for block in answer_blocks:
+            if "correct_answer" in block.metadata:
+                correct_answer = block.metadata["correct_answer"]
                 break
-            
-            # Also check explanation blocks for answer
-            if block.block_type == BlockType.EXPLANATION:
-                answer_match = re.search(self.patterns["correct_answer"], block.text, re.IGNORECASE)
+        
+        # If not found in answer blocks, try extracting from text
+        if not correct_answer:
+            for block in blocks:
+                answer_match = re.search(r'(?:The correct answer is|Correct answer|The answer is|Answer:)\s*([A-F])', block.text, re.IGNORECASE)
                 if answer_match:
                     correct_answer = answer_match.group(1)
                     break
         
-        question.correct_answer = correct_answer
-        
         # Extract explanation
-        explanation_blocks = [b for b in blocks if b.block_type == BlockType.EXPLANATION]
-        explanation_text = " ".join(b.text for b in explanation_blocks)
-        question.explanation = self._clean_text(explanation_text)
+        explanation = " ".join(block.text for block in explanation_blocks)
+        explanation = self.cleaner.clean_text(explanation)
         
-        # Extract "things to remember"
-        remember_blocks = [b for b in blocks if b.block_type == BlockType.REMEMBER]
-        if remember_blocks:
-            remember_text = " ".join(b.text for b in remember_blocks)
-            question.things_to_remember = self._clean_text(remember_text)
-        else:
-            # Try to extract from explanation text
-            remember_match = re.search(r'(?:Things to Remember|Note:)(.*?)(?=\n|$)', 
-                                      explanation_text, re.IGNORECASE | re.DOTALL)
-            if remember_match:
-                question.things_to_remember = self._clean_text(remember_match.group(1))
+        # Extract things to remember
+        things_to_remember = " ".join(block.text for block in remember_blocks)
+        things_to_remember = self.cleaner.clean_text(things_to_remember)
         
-        # Check for tables
-        table_blocks = [b for b in blocks if b.block_type == BlockType.TABLE_HEADER 
-                       or b.block_type == BlockType.TABLE_ROW]
-        if table_blocks:
-            question.has_table = True
-            question.table_html = self._generate_table_html(table_blocks)
+        # Extract bidder data
+        bidder_data = []
+        for block in bidder_blocks:
+            if "bidders" in block.metadata:
+                bidder_data.extend(block.metadata["bidders"])
+        
+        # If no bidder data in blocks, try to extract from question text
+        if not bidder_data:
+            bidder_data = self._extract_bidder_data(question_text)
+        
+        # Handle table data
+        has_table = bool(table_blocks)
+        table_html = ""
+        if has_table:
+            table_html = self._generate_table_html(table_blocks)
+        
+        # Check for math content
+        contains_math = any(block.metadata.get("contains_math", False) for block in blocks) or self._check_for_math(question_text)
+        
+        # Create question object
+        question = QuestionData(
+            id=q_id,
+            text=question_text,
+            options=options,
+            correct_answer=correct_answer,
+            explanation=explanation,
+            things_to_remember=things_to_remember,
+            bidder_data=bidder_data,
+            has_bidder_data=bool(bidder_data),
+            table_html=table_html,
+            has_table=has_table,
+            contains_math=contains_math,
+            source_blocks=blocks
+        )
+        
+        # Validate the question
+        validation_issues = self._validate_question(question)
+        if validation_issues:
+            question.validation_issues = validation_issues
+            self.stats.questions_with_issues += 1
+        
+        return question
     
-    def _process_question_fallback(self, question: QuestionData):
-        """Fallback processing for questions that failed normal processing"""
-        # Basic extraction of question ID and text
-        if not question.text:
-            # Just take all text after question ID
-            full_text = " ".join(b.text for b in question.source_blocks)
-            q_id_match = re.match(self.patterns["question_id"], full_text)
-            if q_id_match:
-                question.text = full_text[q_id_match.end():].strip()
-                question.text = self._clean_text(question.text)
-        
-        # Try to extract options if none found
-        if not question.options:
-            # Look for A., B., C., etc. in full text
-            full_text = " ".join(b.text for b in question.source_blocks)
-            options = {}
-            option_matches = re.finditer(r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\Z)', 
-                                        full_text, re.DOTALL)
-            
-            for match in option_matches:
-                letter = match.group(1)
-                text = match.group(2).strip()
-                if text:
-                    options[letter] = self._clean_text(text)
-            
-            question.options = options
-    
-    def _extract_options_alternative(self, blocks: List[TextBlock], question_text: str) -> Dict[str, str]:
-        """Alternative option extraction for complex layouts"""
+    def _extract_options_from_text(self, text: str) -> Dict[str, str]:
+        """Extract options from text"""
         options = {}
         
-        # Try to find options in the full text
-        full_text = " ".join(b.text for b in blocks)
-        
-        # Remove question text to avoid confusion
-        if question_text:
-            full_text = full_text.replace(question_text, "")
-        
-        # Look for option patterns
-        option_matches = list(re.finditer(r'([A-F])[\.\)]\s+(.*?)(?=\s+[A-F][\.\)]|\Z)', 
-                                      full_text, re.DOTALL))
+        # Find all option blocks
+        option_pattern = r'\n\s*([A-F])[\.\)]\s+(.*?)(?=\n\s*[A-F][\.\)]|\Z)'
+        option_matches = list(re.finditer(option_pattern, text, re.DOTALL))
         
         for match in option_matches:
             letter = match.group(1)
-            text = match.group(2).strip()
-            if text:
-                options[letter] = self._clean_text(text)
+            option_text = match.group(2).strip()
+            
+            # Clean option text
+            option_text = self.cleaner.clean_option_text(option_text)
+            
+            if option_text:  # Only add non-empty options
+                options[letter] = option_text
+        
+        # If no options found with standard pattern, try alternative patterns
+        if not options:
+            # Try with less whitespace requirements
+            alt_pattern = r'([A-F])[\.\)]\s*(.*?)(?=\s*[A-F][\.\)]|\Z)'
+            alt_matches = list(re.finditer(alt_pattern, text, re.DOTALL))
+            
+            for match in alt_matches:
+                letter = match.group(1)
+                option_text = match.group(2).strip()
+                option_text = self.cleaner.clean_option_text(option_text)
+                if option_text:
+                    options[letter] = option_text
         
         return options
     
-    def _extract_bidder_data_from_text(self, text: str) -> List[BidderData]:
+    def _extract_things_to_remember(self, text: str) -> Tuple[str, str]:
+        """Extract 'Things to Remember' section from text"""
+        things_to_remember = ""
+        
+        # Patterns for things to remember sections
+        patterns = [
+            r'Things to Remember[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Remember[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Note[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Important[:\s]+(.*?)(?=\n\n|\Z)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                things_to_remember = match.group(1).strip()
+                # Remove from text
+                text = text[:match.start()] + text[match.end():]
+                break
+        
+        return text, things_to_remember
+    
+    def _extract_explanation(self, text: str) -> Tuple[str, str]:
+        """Extract explanation text"""
+        explanation = ""
+        
+        # Patterns for explanation sections
+        patterns = [
+            r'Explanation[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Therefore[:\s]+(.*?)(?=\n\n|\Z)',
+            r'Thus[:\s]+(.*?)(?=\n\n|\Z)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                explanation = match.group(1).strip()
+                # Remove from text
+                text = text[:match.start()] + text[match.end():]
+                break
+        
+        return text, explanation
+    
+    def _extract_bidder_data(self, text: str) -> List[BidderData]:
         """Extract bidder data from text"""
         bidder_data = []
         
         # Look for patterns like "A 1,500 $40.50"
-        bidder_matches = re.finditer(self.patterns["bidder_data"], text)
+        bidder_matches = re.finditer(r'([A-G])\s+([\d,\s]+)\s+\$([\d\.]+)', text)
         
         for match in bidder_matches:
             bidder = match.group(1)
@@ -555,69 +944,153 @@ class PDFParser:
         
         return bidder_data
     
+    def _check_for_math(self, text: str) -> bool:
+        """Check if text contains mathematical expressions"""
+        math_patterns = [
+            r'[=\+\-\*\/\^\(\)]',
+            r'\d+\.\d+',
+            r'[αβγδεζηθικλμνξοπρστυφχψω]',
+            r'[ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]',
+            r'√|∑|∫|∂|∇|∞',
+            r'\b[A-Za-z]\s*=',
+            r'log|exp|sin|cos|tan',
+            r'var|std|avg|mean',
+        ]
+        
+        return any(re.search(pattern, text) for pattern in math_patterns)
+    
     def _generate_table_html(self, table_blocks: List[TextBlock]) -> str:
-        """Generate HTML for a table"""
+        """Generate HTML for table blocks"""
         if not table_blocks:
             return ""
         
         # Sort blocks by vertical position
         sorted_blocks = sorted(table_blocks, key=lambda b: (b.page_num, b.y0))
         
+        # Extract rows and cells from blocks
+        rows = []
+        for block in sorted_blocks:
+            # Group spans by y-coordinate to form rows
+            spans_by_y = defaultdict(list)
+            for span in block.spans:
+                y_key = round(span.bbox[1])  # round to handle slight misalignments
+                spans_by_y[y_key].append(span)
+            
+            # Sort by y-coordinate
+            sorted_y = sorted(spans_by_y.keys())
+            
+            # Add each row
+            for y in sorted_y:
+                row = [span.text.strip() for span in sorted(spans_by_y[y], key=lambda s: s.bbox[0])]
+                if row:  # Skip empty rows
+                    rows.append(row)
+        
         # Build HTML table
+        if not rows:
+            return ""
+            
         html = "<table border='1'>\n"
         
-        # First block is header
-        header_block = sorted_blocks[0]
-        cells = self._extract_table_cells(header_block)
-        html += "<tr>\n"
-        for cell in cells:
-            html += f"  <th>{cell}</th>\n"
-        html += "</tr>\n"
-        
-        # Rest are data rows
-        for block in sorted_blocks[1:]:
-            cells = self._extract_table_cells(block)
-            if not cells:
-                continue
-                
+        # First row is header
+        if rows:
             html += "<tr>\n"
-            for cell in cells:
-                css_class = ""
-                if re.match(r'^[\d\.\$]+$', cell):
-                    css_class = " align='right'"
-                html += f"  <td{css_class}>{cell}</td>\n"
+            for cell in rows[0]:
+                html += f"  <th>{cell}</th>\n"
             html += "</tr>\n"
+            
+            # Rest are data rows
+            for row in rows[1:]:
+                html += "<tr>\n"
+                for cell in row:
+                    css_class = ""
+                    if re.match(r'^[\d\.\$]+$', cell):
+                        css_class = " align='right'"
+                    html += f"  <td{css_class}>{cell}</td>\n"
+                html += "</tr>\n"
         
         html += "</table>"
         return html
     
-    def _extract_table_cells(self, block: TextBlock) -> List[str]:
-        """Extract cells from a table block"""
-        # Simple approach - just use spans as cells
-        return [span.text for span in block.spans]
+    def _validate_question(self, question: QuestionData) -> List[str]:
+        """Validate question data for completeness and correctness"""
+        issues = []
+        
+        # Question must have text
+        if not question.text.strip():
+            issues.append("Question text is empty")
+        
+        # If options exist, there should be at least 2
+        if question.options and len(question.options) < 2:
+            issues.append(f"Question has only {len(question.options)} options, should have at least 2")
+        
+        # If correct answer is specified, it should be in options
+        if question.correct_answer and question.options:
+            if question.correct_answer not in question.options:
+                issues.append(f"Correct answer '{question.correct_answer}' not in options")
+        
+        # Check for very short options (might indicate parsing issues)
+        for letter, text in question.options.items():
+            if len(text) < 5:  # Arbitrary threshold
+                issues.append(f"Option {letter} is very short: '{text}'")
+        
+        return issues
+
+
+class PDFProcessor:
+    """Main PDF processing class that orchestrates the entire extraction pipeline"""
     
-    def _clean_text(self, text: str) -> str:
-        """Clean text by removing copyright notices, page numbers, etc."""
-        # Remove copyright statements
-        text = re.sub(self.patterns["copyright"], '', text, flags=re.IGNORECASE)
+    def __init__(self, file_path: str, page_range: Optional[Tuple[int, int]] = None):
+        self.file_path = file_path
+        self.page_range = page_range
+        self.doc = None
+        self.extractor = PDFQuestionExtractor(method=ParsingMethod.HYBRID)
+        self.result = ProcessingResult()
+        self.process_id = str(uuid.uuid4())[:8]
+    
+    def process(self) -> Dict[str, Any]:
+        """Process the PDF file and extract questions"""
+        logger.info(f"Processing PDF {self.file_path} (ID: {self.process_id})")
         
-        # Remove page numbers
-        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
-        text = re.sub(r'^[ \t]*\d+[ \t]*$', '', text, flags=re.MULTILINE)
-        
-        # Remove any isolated numbers that might be page numbers
-        text = re.sub(r'\n\s*\d+\s*$', '\n', text, flags=re.MULTILINE)
-        
-        # Clean up any duplicate spaces and newlines
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Remove any "Choice X is incorrect/correct" statements
-        text = re.sub(r'Choice\s+[A-F]\s+is\s+(?:in)?correct\..*?(?=\n|$)', '', text, flags=re.IGNORECASE)
-        
-        return text.strip()
+        try:
+            # Open document
+            self.doc = fitz.open(self.file_path)
+            self.result.total_pages = len(self.doc)
+            
+            # Extract questions
+            questions = self.extractor.extract_from_document(self.doc, self.page_range)
+            self.result.questions = questions
+            
+            # Add statistics
+            self.result.stats = self.extractor.stats
+            
+            logger.info(f"Processed PDF {self.file_path} (ID: {self.process_id}): Found {len(questions)} questions")
+            
+            return self.result.to_dict()
+            
+        except Exception as e:
+            logger.error(f"Error processing PDF {self.file_path} (ID: {self.process_id}): {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            self.result.error = str(e)
+            return self.result.to_dict()
+            
+        finally:
+            # Close document if open
+            if self.doc:
+                self.doc.close()
 
-app = FastAPI()
 
+###############################
+#     API Implementation      #
+###############################
+
+app = FastAPI(
+    title="PDF Quiz Parser API",
+    description="Production-level API for extracting quiz questions from PDF documents",
+    version="1.0.0"
+)
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -626,6 +1099,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add CORS header middleware
 @app.middleware("http")
 async def add_cors_header(request: Request, call_next):
     response = await call_next(request)
@@ -634,19 +1108,103 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
+# In-memory cache for status updates
+processing_status = {}
+
+# Background task to update processing status
+def update_processing_status(request_id: str, status: str, progress: float, message: str):
+    processing_status[request_id] = {
+        "request_id": request_id,
+        "status": status,
+        "progress": progress,
+        "message": message,
+        "timestamp": time.time()
+    }
+    
+    # Clean old status entries
+    current_time = time.time()
+    keys_to_remove = []
+    for key, value in processing_status.items():
+        if current_time - value["timestamp"] > CACHE_EXPIRY:
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        processing_status.pop(key, None)
+
+# Process PDF in background
+async def process_pdf_task(file_path: str, request_id: str, page_range: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:
+    """Process PDF file in a background task"""
+    try:
+        # Update status: Starting
+        update_processing_status(request_id, "processing", 0.1, "Starting PDF processing")
+        
+        # Process PDF
+        processor = PDFProcessor(file_path, page_range)
+        
+        # Run in thread pool to avoid blocking
+        with ThreadPoolExecutor() as executor:
+            result = await asyncio.get_event_loop().run_in_executor(executor, processor.process)
+        
+        # Update status: Complete
+        update_processing_status(request_id, "completed", 1.0, f"Completed processing. Found {result.get('total_questions', 0)} questions")
+        
+        return result
+    
+    except Exception as e:
+        # Update status: Error
+        update_processing_status(request_id, "error", 0, f"Error: {str(e)}")
+        logger.error(f"Error in background processing task: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        return {
+            "error": str(e),
+            "questions": [],
+            "total_pages": 0
+        }
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(file_path):
+                os.unlink(file_path)
+        except Exception as e:
+            logger.error(f"Error cleaning up temp file: {str(e)}")
+
 @app.post("/process")
 async def handle_pdf(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     start_page: Optional[int] = Form(None),
-    end_page: Optional[int] = Form(None)
+    end_page: Optional[int] = Form(None),
+    async_process: bool = Form(False)
 ):
-    """Process a PDF file to extract quiz questions"""
-    request_id = str(uuid.uuid4())[:8]
+    """
+    Process a PDF file to extract quiz questions
+    
+    - `file`: The PDF file to process
+    - `start_page`: Optional start page for processing
+    - `end_page`: Optional end page for processing
+    - `async_process`: Whether to process asynchronously (returns immediately with a request ID)
+    """
+    request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id}: Processing file {file.filename}")
     
     try:
+        # Validate file
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="File must be a PDF")
+        
+        # Save uploaded file to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             content = await file.read()
+            
+            # Check file size
+            file_size_mb = len(content) / (1024 * 1024)
+            if file_size_mb > MAX_PDF_SIZE_MB:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"File too large ({file_size_mb:.1f}MB). Maximum size is {MAX_PDF_SIZE_MB}MB"
+                )
+            
             tmp.write(content)
             tmp_path = tmp.name
         
@@ -658,51 +1216,76 @@ async def handle_pdf(
             page_range = (int(start_page), int(end_page))
             logger.info(f"Request {request_id}: Using page range {page_range}")
         
+        # Process asynchronously if requested
+        if async_process:
+            # Initialize status
+            update_processing_status(
+                request_id, "queued", 0.0, "PDF processing queued"
+            )
+            
+            # Start background processing
+            background_tasks.add_task(
+                process_pdf_task, tmp_path, request_id, page_range
+            )
+            
+            # Return request ID for status checking
+            return {
+                "request_id": request_id,
+                "status": "queued",
+                "message": "PDF processing has been queued",
+                "status_endpoint": f"/status/{request_id}"
+            }
+        
+        # Otherwise, process synchronously
         try:
             # Process with timeout
             result = await asyncio.wait_for(
-                asyncio.to_thread(process_pdf, tmp_path, page_range, request_id),
-                timeout=55.0  # Just under Vercel's 60s limit
+                process_pdf_task(tmp_path, request_id, page_range),
+                timeout=DEFAULT_TIMEOUT
             )
+            
+            # Check for errors
+            if "error" in result and not result.get("questions", []):
+                logger.error(f"Request {request_id}: Processing error: {result['error']}")
+                raise HTTPException(status_code=500, detail=result["error"])
+            
+            logger.info(f"Request {request_id}: Successfully processed {len(result.get('questions', []))} questions")
+            
+            # Include request_id in result
+            result["request_id"] = request_id
+            return result
+            
         except asyncio.TimeoutError:
             logger.error(f"Request {request_id}: Processing timed out")
-            os.unlink(tmp_path)
+            
+            # Update status
+            update_processing_status(
+                request_id, "timeout", 0.0, "PDF processing timed out"
+            )
+            
             raise HTTPException(
                 status_code=408, 
-                detail="PDF processing timed out. Please try a smaller PDF file or fewer pages."
+                detail="PDF processing timed out. Please try using async_process=True for large files."
             )
         
-        # Clean up temp file
-        os.unlink(tmp_path)
-        
-        # Check for errors
-        if "error" in result and not result.get("questions", []):
-            logger.error(f"Request {request_id}: Processing error: {result['error']}")
-            raise HTTPException(status_code=500, detail=result["error"])
-        
-        logger.info(f"Request {request_id}: Successfully processed {len(result.get('questions', []))} questions")
-        return result
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
         
     except Exception as e:
         logger.error(f"Request {request_id}: Error processing PDF: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None, request_id: str = "unknown") -> Dict[str, Any]:
-    """Process a PDF file using PDFParser"""
-    try:
-        logger.info(f"Request {request_id}: Starting PDF processing")
-        
-        with PDFParser(file_path, page_range) as parser:
-            result = parser.process()
-        
-        logger.info(f"Request {request_id}: PDF processing completed")
-        return result
+@app.get("/status/{request_id}")
+async def get_processing_status(request_id: str):
+    """Get status of an asynchronous processing request"""
+    status = processing_status.get(request_id)
     
-    except Exception as e:
-        logger.error(f"Request {request_id}: Error in process_pdf: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to process PDF: {str(e)}", "questions": [], "total_pages": 0}
+    if not status:
+        raise HTTPException(status_code=404, detail=f"No status found for request ID {request_id}")
+    
+    return status
 
 @app.post("/pdf-info")
 async def get_pdf_info(file: UploadFile = File(...)):
@@ -732,18 +1315,17 @@ async def get_pdf_info(file: UploadFile = File(...)):
             "producer": doc.metadata.get("producer", "")
         }
         
-        # Calculate document hash for caching/tracking
-        md5hash = hashlib.md5()
-        md5hash.update(content)
-        doc_hash = md5hash.hexdigest()
+        # Count potential questions
+        question_pattern = re.compile(r'(?:Question\s+\d+|Q\.\s*\d+)')
+        question_count = 0
         
-        # Get page sizes to detect inconsistent page sizes
-        page_sizes = []
-        for i in range(min(total_pages, 10)):  # Check first 10 pages
-            page = doc[i]
-            page_sizes.append((page.rect.width, page.rect.height))
+        for i in range(min(10, total_pages)):  # Check first 10 pages
+            page_text = doc[i].get_text("text")
+            matches = question_pattern.findall(page_text)
+            question_count += len(matches)
         
-        has_consistent_page_size = len(set(page_sizes)) <= 2  # Allow up to 2 different page sizes
+        # Estimate total questions based on sample
+        estimated_questions = round(question_count * (total_pages / min(10, total_pages)))
         
         doc.close()
         os.unlink(tmp_path)
@@ -753,9 +1335,7 @@ async def get_pdf_info(file: UploadFile = File(...)):
             "file_size_mb": round(file_size, 2),
             "metadata": metadata,
             "has_toc": len(toc) > 0,
-            "toc_entries": len(toc),
-            "hash": doc_hash,
-            "has_consistent_page_size": has_consistent_page_size
+            "estimated_questions": estimated_questions
         }
     
     except Exception as e:
@@ -763,54 +1343,312 @@ async def get_pdf_info(file: UploadFile = File(...)):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to get PDF info: {str(e)}")
 
-@app.get("/health")
-def health_check():
-    return {
-        "status": "ok", 
-        "message": "Quiz PDF Parser API is running",
-        "version": "1.0.0",
+@app.post("/batch-process")
+async def batch_process_pdfs(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...)
+):
+    """Process multiple PDF files and return batch request ID"""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    
+    batch_id = str(uuid.uuid4())
+    file_ids = []
+    
+    for file in files:
+        request_id = str(uuid.uuid4())
+        file_ids.append(request_id)
+        
+        # Save uploaded file to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        # Initialize status
+        update_processing_status(
+            request_id, "queued", 0.0, f"PDF processing queued for {file.filename}"
+        )
+        
+        # Start background processing
+        background_tasks.add_task(
+            process_pdf_task, tmp_path, request_id, None
+        )
+    
+    # Store batch info
+    processing_status[batch_id] = {
+        "request_id": batch_id,
+        "status": "batch_processing",
+        "file_ids": file_ids,
+        "total_files": len(files),
         "timestamp": time.time()
+    }
+    
+    return {
+        "batch_id": batch_id,
+        "file_ids": file_ids,
+        "total_files": len(files),
+        "status_endpoint": f"/batch-status/{batch_id}"
+    }
+
+@app.get("/batch-status/{batch_id}")
+async def get_batch_status(batch_id: str):
+    """Get status of a batch processing request"""
+    batch_info = processing_status.get(batch_id)
+    
+    if not batch_info or batch_info.get("status") != "batch_processing":
+        raise HTTPException(status_code=404, detail=f"No batch found with ID {batch_id}")
+    
+    file_ids = batch_info.get("file_ids", [])
+    file_statuses = []
+    
+    for file_id in file_ids:
+        status = processing_status.get(file_id, {
+            "request_id": file_id,
+            "status": "unknown",
+            "progress": 0.0,
+            "message": "Status not found"
+        })
+        file_statuses.append(status)
+    
+    # Calculate overall progress
+    completed = sum(1 for s in file_statuses if s.get("status") == "completed")
+    error_count = sum(1 for s in file_statuses if s.get("status") == "error")
+    overall_progress = sum(s.get("progress", 0) for s in file_statuses) / len(file_statuses) if file_statuses else 0
+    
+    return {
+        "batch_id": batch_id,
+        "total_files": len(file_ids),
+        "completed": completed,
+        "errors": error_count,
+        "overall_progress": overall_progress,
+        "file_statuses": file_statuses
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    import psutil
+    process = psutil.Process()
+    
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "uptime": time.time() - process.create_time(),
+        "memory_usage_mb": process.memory_info().rss / (1024 * 1024)
     }
 
 @app.get("/")
 def read_root():
     return {
-        "message": "PDF Quiz Generator API", 
-        "docs": "/docs",
-        "status": "/health"
+        "message": "PDF Quiz Parser API",
+        "version": "1.0.0",
+        "docs_url": "/docs",
+        "health_check": "/health"
     }
 
 @app.options("/{path:path}")
 async def options_route(request: Request, path: str):
     return {}
 
-# Test functions to help with debugging
-def test_parser(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:
-    """Test the parser with a local file"""
-    with PDFParser(file_path, page_range) as parser:
-        return parser.process()
 
-def analyze_block_types(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict[str, int]:
-    """Analyze block types in a PDF file"""
-    with PDFParser(file_path, page_range) as parser:
-        parser.extract_blocks()
-        parser.classify_blocks()
-        
-        type_counts = Counter(block.block_type for block in parser.blocks)
-        return {str(block_type): count for block_type, count in type_counts.items()}
+###############################
+#      Test Cases             #
+###############################
 
-def dump_blocks(file_path: str, output_path: str, page_range: Optional[Tuple[int, int]] = None) -> None:
-    """Dump blocks to a file for inspection"""
-    with PDFParser(file_path, page_range) as parser:
-        parser.extract_blocks()
-        parser.classify_blocks()
+def test_option_extraction():
+    """Test option extraction with various formats"""
+    extractor = PDFQuestionExtractor()
+    
+    test_cases = [
+        # Standard format
+        """
+        A. Option text one
+        B. Option text two
+        C. Option text three
+        D. Option text four
+        """,
         
-        with open(output_path, "w") as f:
-            for i, block in enumerate(parser.blocks):
-                f.write(f"Block {i}:\n")
-                f.write(f"  Type: {block.block_type}\n")
-                f.write(f"  Page: {block.page_num}\n")
-                f.write(f"  BBox: {block.bbox}\n")
-                f.write(f"  Text: {block.text[:100]}{'...' if len(block.text) > 100 else ''}\n")
-                f.write(f"  Metadata: {block.metadata}\n")
-                f.write("\n")
+        # No spaces after letters
+        """
+        A.Option text one
+        B.Option text two
+        C.Option text three
+        D.Option text four
+        """,
+        
+        # Parentheses format
+        """
+        A) Option text one
+        B) Option text two
+        C) Option text three
+        D) Option text four
+        """,
+        
+        # Mixed format (should still work)
+        """
+        A. Option text one
+        B) Option text two
+        C.Option text three
+        D. Option text four
+        """,
+        
+        # With correct answer in option
+        """
+        A. Option text one
+        B. Option text two (correct answer)
+        C. Option text three
+        D. Option text four
+        """,
+        
+        # With empty option
+        """
+        A. Option text one
+        B. Option text two
+        C. Option text three
+        D. 
+        """,
+        
+        # With numericals
+        """
+        A. 100,000 at $25
+        B. 200,000 at $30
+        C. 300,000 at $35
+        D. 400,000 at $40
+        """
+    ]
+    
+    results = []
+    for i, test_case in enumerate(test_cases):
+        options = extractor._extract_options_from_text(test_case)
+        results.append({
+            "case": i + 1,
+            "options_found": len(options),
+            "options": options
+        })
+    
+    return results
+
+def test_answer_extraction():
+    """Test correct answer extraction with various formats"""
+    cleaner = PDFTextCleaner()
+    
+    test_cases = [
+        "The correct answer is A. This is the explanation.",
+        "Correct answer: B. The explanation follows.",
+        "The answer is C.",
+        "Answer: D. With explanation.",
+        "The answer is E. This is why.",
+        "The correct choice is F.",
+        "No answer here."
+    ]
+    
+    results = []
+    for i, test_case in enumerate(test_cases):
+        cleaned_text, answer = cleaner.remove_answer_from_text(test_case)
+        results.append({
+            "case": i + 1,
+            "original": test_case,
+            "cleaned": cleaned_text,
+            "answer": answer
+        })
+    
+    return results
+
+def test_real_pdf(file_path):
+    """Run the full parser on a real PDF and analyze results"""
+    processor = PDFProcessor(file_path)
+    result = processor.process()
+    
+    # Analyze results
+    questions = result.get("questions", [])
+    stats = result.get("stats", {})
+    
+    analysis = {
+        "total_questions": len(questions),
+        "questions_with_options": sum(1 for q in questions if q.get("options")),
+        "questions_with_correct_answer": sum(1 for q in questions if q.get("correct")),
+        "questions_with_explanation": sum(1 for q in questions if q.get("explanation")),
+        "questions_with_issues": sum(1 for q in questions if q.get("validation_issues")),
+        "questions_with_bidder_data": sum(1 for q in questions if q.get("has_bidder_data", False)),
+        "questions_with_tables": sum(1 for q in questions if q.get("has_table", False)),
+        "questions_with_math": sum(1 for q in questions if q.get("contains_math", False)),
+        "stats": stats
+    }
+    
+    return analysis
+
+def test_edge_cases():
+    """Test handling of various edge cases"""
+    extractor = PDFQuestionExtractor()
+    
+    edge_cases = [
+        # Case 1: Answer in question, no options
+        {
+            "text": "Question 1. What is 2+2? The correct answer is C. Four.",
+            "expected_answer": "C"
+        },
+        
+        # Case 2: Empty options
+        {
+            "text": "Question 2. Choose:\nA. \nB. Option B\nC. Option C",
+            "expected_options": ["B", "C"]
+        },
+        
+        # Case 3: Bidder data but no question
+        {
+            "text": "A 200,000 $40.50 B 150,000 $39.50 C 400,000 $41.00",
+            "expected_bidders": 3
+        },
+        
+        # Case 4: Correct answer not in options
+        {
+            "text": "Question 4. Choose:\nA. Option A\nB. Option B\nThe correct answer is C.",
+            "expected_issues": ["Correct answer 'C' not in options"]
+        },
+        
+        # Case 5: Options with very short text
+        {
+            "text": "Question 5. Choose:\nA. OK\nB. No\nC. Yes\nD. Maybe",
+            "expected_issues": ["Option A is very short", "Option B is very short", "Option C is very short"]
+        }
+    ]
+    
+    results = []
+    for i, case in enumerate(edge_cases):
+        question = extractor._process_question_text(case["text"], i + 1)
+        
+        result = {
+            "case": i + 1,
+            "passed": False,
+            "details": {}
+        }
+        
+        if "expected_answer" in case:
+            result["details"]["expected_answer"] = case["expected_answer"]
+            result["details"]["actual_answer"] = question.correct_answer
+            result["passed"] = question.correct_answer == case["expected_answer"]
+        
+        if "expected_options" in case:
+            result["details"]["expected_options"] = case["expected_options"]
+            result["details"]["actual_options"] = list(question.options.keys())
+            result["passed"] = all(opt in question.options for opt in case["expected_options"])
+        
+        if "expected_bidders" in case:
+            result["details"]["expected_bidders"] = case["expected_bidders"]
+            result["details"]["actual_bidders"] = len(question.bidder_data)
+            result["passed"] = len(question.bidder_data) == case["expected_bidders"]
+        
+        if "expected_issues" in case:
+            result["details"]["expected_issues"] = case["expected_issues"]
+            result["details"]["actual_issues"] = question.validation_issues
+            result["passed"] = all(issue in question.validation_issues for issue in case["expected_issues"])
+        
+        results.append(result)
+    
+    return results
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(app, host="0.0.0.0", port=8000)
