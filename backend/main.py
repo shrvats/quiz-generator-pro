@@ -27,79 +27,219 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
+def extract_content(doc, page_range=None):
+    """Extract structured content from PDF pages"""
+    if page_range:
+        start_page, end_page = page_range
+        start_page = max(0, start_page)
+        end_page = min(len(doc) - 1, end_page)
+        pages = range(start_page, end_page + 1)
+    else:
+        pages = range(len(doc))
+    
+    # Extract all blocks from PDF
+    all_blocks = []
+    for page_num in pages:
+        page = doc[page_num]
+        page_dict = page.get_text("dict")
+        
+        # Add page blocks with page number
+        for block in page_dict["blocks"]:
+            if "lines" in block:
+                block_text = ""
+                for line in block["lines"]:
+                    if "spans" in line:
+                        for span in line["spans"]:
+                            block_text += span.get("text", "") + " "
+                
+                # Skip empty blocks
+                if not block_text.strip():
+                    continue
+                
+                # Add block with metadata
+                all_blocks.append({
+                    "page": page_num,
+                    "text": block_text.strip(),
+                    "bbox": block["bbox"],
+                    "type": "unknown",  # Will classify later
+                    "block_obj": block  # Keep original for structure
+                })
+    
+    return all_blocks
+
+def classify_blocks(blocks):
+    """Classify blocks by content type"""
+    classified_blocks = []
+    
+    # First pass: basic classification
+    for block in blocks:
+        text = block["text"]
+        
+        # Skip copyright and page numbers
+        if (re.search(r'©\s*\d{4}|Copyright', text, re.IGNORECASE) or
+            re.match(r'^\s*\d+\s*$', text)):
+            block["type"] = "skip"
+            continue
+        
+        # Question ID blocks
+        if re.match(r'(?:Question\s+\d+|Q\.\s*\d+)', text):
+            block["type"] = "question_id"
+        
+        # Option blocks
+        elif re.match(r'^[A-F][\.\)]\s+', text):
+            block["type"] = "option"
+            # Extract option letter
+            match = re.match(r'^([A-F])[\.\)]', text)
+            if match:
+                block["option_letter"] = match.group(1)
+        
+        # Explanation blocks
+        elif (re.search(r'correct answer|explanation|the answer is', text, re.IGNORECASE) or
+              re.search(r'is correct', text, re.IGNORECASE)):
+            block["type"] = "explanation"
+        
+        # Things to remember blocks
+        elif re.search(r'things to remember|note:|remember:', text, re.IGNORECASE):
+            block["type"] = "remember"
+        
+        # Treat all other blocks as potential question content for now
+        else:
+            block["type"] = "content"
+        
+        classified_blocks.append(block)
+    
+    # Find question boundaries
+    question_starts = [i for i, block in enumerate(classified_blocks) if block["type"] == "question_id"]
+    
+    # Group blocks by question
+    questions = []
+    for i in range(len(question_starts)):
+        start_idx = question_starts[i]
+        end_idx = question_starts[i+1] if i+1 < len(question_starts) else len(classified_blocks)
+        
+        question_blocks = classified_blocks[start_idx:end_idx]
+        if question_blocks:
+            # Extract question ID
+            q_id_block = question_blocks[0]
+            q_id_match = re.search(r'(?:Question\s+(\d+)|Q\.\s*(\d+))', q_id_block["text"])
+            q_id = next((g for g in q_id_match.groups() if g), "0") if q_id_match else "0"
+            
+            questions.append({
+                "id": int(q_id),
+                "blocks": question_blocks
+            })
+    
+    return questions
+
+def process_question(question_data):
+    """Process a question's blocks into structured data"""
+    blocks = question_data["blocks"]
+    q_id = question_data["id"]
+    
+    # Initialize question components
+    question_text = ""
+    options = {}
+    explanation = ""
+    things_to_remember = ""
+    correct_answer = None
+    
+    # First, separate blocks by type
+    option_blocks = [b for b in blocks if b["type"] == "option"]
+    explanation_blocks = [b for b in blocks if b["type"] == "explanation"]
+    remember_blocks = [b for b in blocks if b["type"] == "remember"]
+    
+    # Question blocks - all non-option/explanation/remember blocks after the question_id
+    question_id_index = next((i for i, b in enumerate(blocks) if b["type"] == "question_id"), 0)
+    content_blocks = []
+    for i, block in enumerate(blocks):
+        if (i > question_id_index and 
+            block["type"] not in ["option", "explanation", "remember", "skip"] and
+            i < min([blocks.index(b) for b in option_blocks] or [len(blocks)])):
+            content_blocks.append(block)
+    
+    # Extract question text
+    for block in content_blocks:
+        # Clean text of any copyright notices or page numbers
+        text = clean_text(block["text"])
+        if text:
+            question_text += text + " "
+    
+    # Extract options
+    for block in option_blocks:
+        if "option_letter" in block:
+            option_letter = block["option_letter"]
+            # Remove option letter (A., B., etc) from beginning
+            option_text = re.sub(r'^[A-F][\.\)]\s+', '', block["text"])
+            options[option_letter] = clean_text(option_text)
+    
+    # Extract explanation
+    for block in explanation_blocks:
+        text = clean_text(block["text"])
+        
+        # Check for correct answer
+        answer_match = re.search(r'(?:correct answer is|answer is|correct:)\s*([A-F])\.?', text, re.IGNORECASE)
+        if answer_match:
+            correct_answer = answer_match.group(1)
+        
+        explanation += text + " "
+    
+    # Extract things to remember
+    for block in remember_blocks:
+        things_to_remember += clean_text(block["text"]) + " "
+    
+    # Clean and finalize 
+    question_text = clean_text(question_text.strip())
+    explanation = clean_text(explanation.strip())
+    things_to_remember = clean_text(things_to_remember.strip())
+    
+    # Final cleaning: Remove question ID from question text
+    question_text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.\s*\d+(?:\(Q\.\d+\))?)\s*', '', question_text)
+    
+    # Final check for empty options
+    options = {k: v for k, v in options.items() if v.strip()}
+    
+    return {
+        "id": q_id,
+        "question": question_text,
+        "options": options,
+        "correct": correct_answer,
+        "explanation": explanation,
+        "things_to_remember": things_to_remember,
+        "has_options": len(options) > 0
+    }
+
 def clean_text(text):
     """Clean text by removing copyright notices, page numbers, etc."""
-    # Remove copyright statements and year ranges (© 2014-2025 AnalystPrep)
-    text = re.sub(r'(?:©|Copyright\s*©?)\s*\d+(?:-\d+)?\s*[A-Za-z]+(?:Prep)?\.?', '', text, flags=re.IGNORECASE)
+    # Remove copyright statements
+    text = re.sub(r'(?:©|Copyright\s*©?)\s*\d{4}(?:-\d{4})?\s*[A-Za-z0-9]+(?:Prep)?\.?.*?(?=\n|$)', '', text, flags=re.IGNORECASE)
     
     # Remove page numbers
     text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+    text = re.sub(r'^[ \t]*\d+[ \t]*$', '', text, flags=re.MULTILINE)
     
-    # Remove standalone numbers that might be page numbers
+    # Remove any isolated numbers that might be page numbers
     text = re.sub(r'\n\s*\d+\s*$', '\n', text, flags=re.MULTILINE)
     
-    return text
+    return text.strip()
 
 def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) -> Dict:
-    """Process PDF to extract quiz questions and answers"""
+    """Process PDF to extract quiz questions using block structure"""
     try:
         doc = fitz.open(file_path)
         total_pages = len(doc)
         
-        # Adjust page range if provided
-        if page_range:
-            start_page, end_page = page_range
-            start_page = max(0, start_page)
-            end_page = min(len(doc) - 1, end_page)
-            page_iterator = range(start_page, end_page + 1)
-        else:
-            page_iterator = range(len(doc))
+        # Extract blocks with classified type
+        blocks = extract_content(doc, page_range)
         
-        # Extract all text from PDF first
-        all_text = ""
-        for page_num in page_iterator:
-            page = doc[page_num]
-            all_text += page.get_text("text") + "\n"
+        # Group blocks into questions
+        question_groups = classify_blocks(blocks)
         
-        # Clean all copyright notices and page numbers
-        all_text = clean_text(all_text)
-        
-        # Find all questions in the text
+        # Process each question group
         questions = []
-        
-        # Match Q.XXXX or Question X patterns
-        question_pattern = r'(?:Question\s+(\d+)(?:\(Q\.(\d+)\))?|Q\.?\s*(\d+)(?:\(Q\.(\d+)\))?)'
-        
-        # Find all question matches
-        question_matches = list(re.finditer(question_pattern, all_text))
-        
-        for i, match in enumerate(question_matches):
-            # Get question ID
-            q_num = None
-            for group in match.groups():
-                if group:
-                    q_num = group
-                    break
-            
-            if not q_num:
-                continue
-                
-            # Calculate text boundaries for this question
-            start_pos = match.start()
-            if i < len(question_matches) - 1:
-                end_pos = question_matches[i+1].start()
-            else:
-                end_pos = len(all_text)
-            
-            question_text_block = all_text[start_pos:end_pos].strip()
-            
-            # Process this question
-            question_data = extract_question_data(question_text_block, q_num)
-            if question_data:
+        for question_group in question_groups:
+            question_data = process_question(question_group)
+            if question_data and question_data["question"]:
                 questions.append(question_data)
-        
-        # Sort questions by ID
-        questions.sort(key=lambda q: q["id"])
         
         return {
             "questions": questions,
@@ -111,167 +251,6 @@ def process_pdf(file_path: str, page_range: Optional[Tuple[int, int]] = None) ->
         print(f"Error in PDF processing: {str(e)}")
         traceback.print_exc()
         return {"error": f"Failed to process PDF: {str(e)}", "questions": [], "total_pages": 0}
-
-def extract_question_data(text, q_id):
-    """Extract all components of a question"""
-    try:
-        # Get the main question text
-        main_question = extract_question_text(text)
-        
-        # Get the options
-        options = extract_clean_options(text)
-        
-        # Get the correct answer
-        correct_answer = extract_correct_answer(text)
-        
-        # Get any numeric values in the question (for financial calculations)
-        numeric_value = extract_numeric_value(text)
-        
-        # Get explanation (to be shown after answering)
-        explanation = extract_explanation(text)
-        
-        # Get "Things to Remember" section
-        things_to_remember = extract_things_to_remember(text)
-        
-        # Create question object
-        question = {
-            "id": int(q_id) if q_id.isdigit() else 0,
-            "question": main_question,
-            "options": options,
-            "correct": correct_answer,
-            "explanation": explanation,
-            "things_to_remember": things_to_remember,
-            "numeric_value": numeric_value,
-            "has_options": len(options) > 0
-        }
-        
-        return question
-    except Exception as e:
-        print(f"Error extracting question data: {str(e)}")
-        return None
-
-def extract_question_text(text):
-    """Extract only the main question text"""
-    # Remove the question ID/number
-    text = re.sub(r'^(?:Question\s+\d+(?:\(Q\.\d+\))?|Q\.?\s*\d+(?:\(Q\.\d+\))?)\s*', '', text)
-    
-    # Find where the options start
-    option_match = re.search(r'\n\s*[A-F][\.\)]\s+', text)
-    if option_match:
-        # Cut off at first option
-        text = text[:option_match.start()]
-    
-    # Also cut off at any "Choice X is..." text which might be in tables
-    choice_match = re.search(r'\n\s*Choice\s+[A-F]\s+is\s+', text, re.IGNORECASE)
-    if choice_match:
-        text = text[:choice_match.start()]
-    
-    # Remove any "The correct answer is..." text
-    text = re.sub(r'The correct answer is [A-F]\..*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'(?:Correct answer|Answer)[:\s]+[A-F]\.?.*', '', text, flags=re.IGNORECASE)
-    
-    return text.strip()
-
-def extract_clean_options(text):
-    """Extract options (A, B, C, D) without any explanations or copyright notices"""
-    options = {}
-    
-    # Find all option blocks
-    option_pattern = r'(?:^|\n)\s*([A-F])[\.\)]\s*(.*?)(?=\n\s*[A-F][\.\)]|\n\s*(?:Things to Remember|Choice [A-F] is)|\Z)'
-    option_matches = re.finditer(option_pattern, text, re.DOTALL)
-    
-    for match in option_matches:
-        letter = match.group(1)
-        option_text = match.group(2).strip()
-        
-        # Clean the option text
-        # Remove any copyright notices
-        option_text = re.sub(r'(?:©|Copyright\s*©?)\s*\d+(?:-\d+)?\s*[A-Za-z]+(?:Prep)?\.?.*?(?=\n|$)', '', option_text, flags=re.IGNORECASE)
-        
-        # Remove "Things to Remember" and anything after it
-        option_text = re.sub(r'Things to Remember.*', '', option_text, flags=re.DOTALL | re.IGNORECASE)
-        
-        # Remove any "Choice X is..." text 
-        option_text = re.sub(r'Choice\s+[A-F]\s+is\s+(?:in)?correct\..*', '', option_text, flags=re.DOTALL | re.IGNORECASE)
-        
-        # Remove any "The correct answer is..." text
-        option_text = re.sub(r'The correct answer is [A-F]\..*', '', option_text, flags=re.DOTALL | re.IGNORECASE)
-        option_text = re.sub(r'(?:Correct answer|Answer)[:\s]+[A-F]\.?.*', '', option_text, flags=re.DOTALL | re.IGNORECASE)
-        
-        # Remove page numbers
-        option_text = re.sub(r'\n\s*\d+\s*\n', '\n', option_text)
-        
-        # Clean up and store
-        options[letter] = option_text.strip()
-    
-    return options
-
-def extract_correct_answer(text):
-    """Extract the correct answer letter"""
-    patterns = [
-        r'(?:The correct answer is|Correct answer[:\s]+)([A-F])\.?',
-        r'The answer is ([A-F])\.?',
-        r'Answer:\s*([A-F])\.?',
-        r'Choice\s+([A-F])\s+is\s+correct\.'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def extract_numeric_value(text):
-    """Extract numeric values for financial questions"""
-    patterns = [
-        r'(\d+\.\d+)\s+([A-Z])\s+([\d,]+)',  # For patterns like "39.00 F 50,000"
-        r'(\d+\.\d+)\s*([A-Z])?\s*([\d,]*)',  # More general pattern
-        r'(\d+\.\d+)'  # Just a number
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(0).strip()
-    
-    return None
-
-def extract_explanation(text):
-    """Extract explanation text to be shown after answering"""
-    explanation = ""
-    
-    # Look for explanation after correct answer
-    exp_match = re.search(r'(?:The correct answer is|Correct answer[:\s]+)[A-F]\.?\s*(.*?)(?=\n\s*(?:Things to Remember:|Choice [A-F] is)|\Z)', 
-                         text, re.DOTALL | re.IGNORECASE)
-    if exp_match:
-        explanation = exp_match.group(1).strip()
-    
-    # Also look for explicit explanation section
-    if not explanation:
-        exp_match = re.search(r'Explanation:\s*(.*?)(?=\n\s*(?:Things to Remember:|Choice [A-F] is)|\Z)',
-                             text, re.DOTALL | re.IGNORECASE)
-        if exp_match:
-            explanation = exp_match.group(1).strip()
-    
-    # Clean any copyright notices from explanation
-    explanation = re.sub(r'(?:©|Copyright\s*©?)\s*\d+(?:-\d+)?\s*[A-Za-z]+(?:Prep)?\.?.*?(?=\n|$)', '', explanation, flags=re.IGNORECASE)
-    
-    return explanation
-
-def extract_things_to_remember(text):
-    """Extract 'Things to Remember' section"""
-    remember_match = re.search(r'Things to Remember\s*(.*?)(?=\n\s*(?:Choice [A-F] is)|\Z)', 
-                              text, re.DOTALL | re.IGNORECASE)
-    if remember_match:
-        remember_text = remember_match.group(1).strip()
-        
-        # Clean any copyright notices
-        remember_text = re.sub(r'(?:©|Copyright\s*©?)\s*\d+(?:-\d+)?\s*[A-Za-z]+(?:Prep)?\.?.*?(?=\n|$)', '', remember_text, flags=re.IGNORECASE)
-        
-        return remember_text
-    
-    return ""
 
 @app.post("/process")
 async def handle_pdf(
