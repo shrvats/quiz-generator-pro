@@ -130,6 +130,7 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
         "questions": [],
         "options": [],
         "explanations": [],
+        "reminders": [],  # Added category for things to remember
         "other": []
     }
     
@@ -179,6 +180,14 @@ def categorize_blocks(blocks: List[Dict]) -> Dict[str, List[Dict]]:
             current_category = "explanations"
             categorized[current_category].append(block)
             continue
+        
+        # Check for "things to remember" sections
+        if (re.search(r'remember|note:|important:|must:|warning', text, re.IGNORECASE) or
+            text.startswith("Note:") or
+            text.startswith("Remember:")):
+            current_category = "reminders"
+            categorized[current_category].append(block)
+            continue
             
         # Otherwise, continue with current category
         categorized[current_category].append(block)
@@ -195,7 +204,7 @@ def identify_questions_from_blocks(blocks: List[Dict]) -> List[Dict]:
         text = block["text"].strip()
         
         # Check if this block is the start of a new question
-        question_match = re.search(r'Q\.?\s*(\d+)|Question\s+(\d+)|\n(\d+)\.\s+', text)
+        question_match = re.search(r'Q\.?\s*(\d+)|Question\s+(\d+)|\n?(\d+)\.?\s+', text)
         
         if question_match:
             # Save previous question if any
@@ -212,6 +221,7 @@ def identify_questions_from_blocks(blocks: List[Dict]) -> List[Dict]:
                 "options": {},
                 "correct_answer": None,
                 "explanation": "",
+                "reminders": "",  # Added field for things to remember
                 "blocks": [block]
             }
         elif current_question:
@@ -225,9 +235,9 @@ def identify_questions_from_blocks(blocks: List[Dict]) -> List[Dict]:
                 # This is an option
                 option_letter, option_text = option_match.groups()
                 current_question["options"][option_letter] = option_text.strip()
-            elif "correct answer" in text.lower() or "the answer is" in text.lower():
+            elif re.search(r'correct\s+answer|the\s+answer\s+is', text, re.IGNORECASE):
                 # This might contain the correct answer
-                answer_match = re.search(r'([A-D])\s+is\s+(?:the\s+)?correct|correct\s+answer\s+is\s+([A-D])|answer\s+is\s+([A-D])', text, re.IGNORECASE)
+                answer_match = re.search(r'([A-D])\s+is\s+(?:the\s+)?correct|correct\s+answer\s+is\s+([A-D])|answer\s+is\s+([A-D])|correct:\s*([A-D])', text, re.IGNORECASE)
                 if answer_match:
                     correct = next((g for g in answer_match.groups() if g), "")
                     current_question["correct_answer"] = correct
@@ -243,6 +253,12 @@ def identify_questions_from_blocks(blocks: List[Dict]) -> List[Dict]:
                     current_question["explanation"] += " " + text
                 else:
                     current_question["explanation"] = text
+            elif re.search(r'remember|note:|important:|must:|warning', text, re.IGNORECASE):
+                # This is part of things to remember
+                if current_question["reminders"]:
+                    current_question["reminders"] += " " + text
+                else:
+                    current_question["reminders"] = text
             elif not option_match and not current_question["options"]:
                 # If we haven't seen options yet, this is part of the question text
                 current_question["text"] += " " + text
@@ -294,12 +310,50 @@ def extract_text_between_options(doc, question: Dict) -> Dict:
             # If we found blocks between options, add their text to the current option
             if between_blocks:
                 between_text = " ".join(b["text"] for b in between_blocks)
+                # Remove any option markers that might be at the end
                 between_text = re.sub(r'[A-D][\.\)].*$', '', between_text)
                 
                 if current_option in result["options"]:
                     result["options"][current_option] += " " + between_text.strip()
     
     return result
+
+def extract_tables_for_question(doc, question: Dict) -> List[str]:
+    """Extract tables only for the specific question's pages and context"""
+    tables = []
+    page_nums = set(block["page"] for block in question["blocks"])
+    
+    # Get the vertical range of the question on each page
+    question_ranges = {}
+    for page_num in page_nums:
+        blocks_on_page = [b for b in question["blocks"] if b["page"] == page_num]
+        if blocks_on_page:
+            min_y = min(b["bbox"][1] for b in blocks_on_page)
+            max_y = max(b["bbox"][3] for b in blocks_on_page)
+            # Add some margin
+            question_ranges[page_num] = (max(0, min_y - 50), max_y + 50)
+    
+    # Extract tables that are within the question's context
+    for page_num in page_nums:
+        page = doc[page_num]
+        page_tables = extract_tables_from_page(page)
+        
+        # If we have vertical range info, filter tables that might be in this range
+        # This is approximate since we don't have position info for tables
+        if len(page_tables) > 0 and page_num in question_ranges:
+            # For now, just use the first table if there are multiple on the page
+            # A more sophisticated approach would analyze table position
+            tables.append(page_tables[0])
+    
+    # Deduplicate tables by content
+    unique_tables = []
+    table_contents = set()
+    for table in tables:
+        if table not in table_contents:
+            table_contents.add(table)
+            unique_tables.append(table)
+    
+    return unique_tables
 
 def extract_tables_from_page(page) -> List[str]:
     """Extract tables from a page and convert to HTML"""
@@ -322,7 +376,7 @@ def extract_tables_from_page(page) -> List[str]:
                     row = [span.get("text", "").strip() for span in line["spans"]]
                     table_data.append(row)
                 
-                # APPENDED CHANGE: Only convert if at least one cell is non-empty
+                # Only convert if at least one cell is non-empty
                 if any(cell.strip() for row in table_data for cell in row):
                     html = "<table border='1'>\n"
                     html += "<tr>\n"
@@ -384,23 +438,40 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
         options = {}
         correct_answer = None
         
+        # Process options, ensuring full text is captured
         for key, value in enhanced_question["options"].items():
-            clean_value = re.sub(r'.*correct answer is.*', '', value, flags=re.IGNORECASE)
+            # Clean option text
+            clean_value = value.strip()
+            # Remove any answer markers from option text
+            clean_value = re.sub(r'.*correct answer is.*', '', clean_value, flags=re.IGNORECASE)
             options[key] = clean_value.strip()
         
+        # Extract correct answer from different sources
+        # First, check if it's directly specified in the question
+        if enhanced_question.get("correct_answer"):
+            correct_answer = enhanced_question["correct_answer"]
+        
+        # Next, check the explanation
         explanation = enhanced_question.get("explanation", "")
-        if explanation:
-            answer_match = re.search(r'correct answer is\s+([A-D])|answer\s+is\s+([A-D])', explanation, re.IGNORECASE)
+        if explanation and not correct_answer:
+            answer_match = re.search(r'correct answer is\s+([A-D])|answer\s+is\s+([A-D])|correct:\s*([A-D])', 
+                                    explanation, re.IGNORECASE)
             if answer_match:
                 correct = next((g for g in answer_match.groups() if g), "")
                 correct_answer = correct
+                
+        # Also check if any option is marked as "correct" in its text
+        for key, value in options.items():
+            if re.search(r'correct|right answer', value, re.IGNORECASE):
+                correct_answer = key
+                # Remove the "correct" marker from the option text
+                options[key] = re.sub(r'\s*\(correct\)|\s*\(right answer\)|\s*correct|\s*right answer', 
+                                     '', options[key], flags=re.IGNORECASE)
         
-        # APPENDED CHANGE: Extract and store all tables as one concatenated HTML string.
-        tables = []
-        page_nums = set(block["page"] for block in enhanced_question["blocks"])
-        for page_num in page_nums:
-            tables.extend(extract_tables_from_page(doc[page_num]))
+        # Extract tables specific to this question
+        tables = extract_tables_for_question(doc, enhanced_question)
         
+        # Process mathematical content
         question_text, contains_math = extract_mathematical_content(enhanced_question["text"])
         
         for key, value in options.items():
@@ -412,8 +483,8 @@ def process_questions_and_options(identified_questions: List[Dict], doc) -> List
             "options": options,
             "correct": correct_answer,
             "explanation": explanation,
+            "reminders": enhanced_question.get("reminders", ""),  # Add the reminders field
             "has_table": len(tables) > 0,
-            # APPENDED CHANGE: Join all extracted tables into one HTML string.
             "table_html": "\n".join(tables) if tables else None,
             "contains_math": contains_math
         }
