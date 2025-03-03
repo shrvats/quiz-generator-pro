@@ -58,80 +58,118 @@ export default function QuizRenderer() {
   };
 
   // Handle file upload and processing
-  const handleFile = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  // Update the QuizRenderer component to handle backend availability
+// Replace or modify your existing handleFile function in QuizRenderer.jsx
+
+const handleFile = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  
+  const validation = validateFile(file);
+  if (!validation.valid) {
+    setError(validation.message);
+    return;
+  }
+  
+  // Reset states
+  setLoading(true);
+  setError(null);
+  setProcessingTime(0);
+  setUploadProgress(0);
+  setAllQuestions([]);
+  setTimeoutWarningShown(false);
+  
+  // Start timer
+  const timer = setInterval(() => setProcessingTime(prev => prev + 1), 1000);
+  setProcessingTimer(timer);
+  
+  // Set timeout warning
+  const timeoutWarning = setTimeout(() => {
+    if (loading) setTimeoutWarningShown(true);
+  }, 30000);
+  
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
     
-    const validation = validateFile(file);
-    if (!validation.valid) {
-      setError(validation.message);
+    // First try a quick health check to see if backend is responsive
+    try {
+      const healthCheckResponse = await fetch(`${BACKEND_URL}/health`, { 
+        signal: AbortSignal.timeout(3000) // 3-second timeout for health check
+      });
+      
+      if (!healthCheckResponse.ok) {
+        throw new Error(`Backend not ready (Status: ${healthCheckResponse.status})`);
+      }
+    } catch (healthError) {
+      // If health check fails, show a specific message about backend cold start
+      setLoading(false);
+      clearInterval(timer);
+      clearTimeout(timeoutWarning);
+      setError(
+        "The backend server is currently starting up (cold start). " +
+        "This can take 1-2 minutes for free-tier hosting. " +
+        "Please wait a moment and try again."
+      );
       return;
     }
     
-    // Reset states
-    setLoading(true);
-    setError(null);
-    setProcessingTime(0);
-    setUploadProgress(0);
-    setAllQuestions([]);
-    setQuizMode(false);
-    setQuizQuestions([]);
-    setSelectedAnswers({});
-    setShowResults(false);
-    setTimeoutWarningShown(false);
-    
-    // Start timer
-    const timer = setInterval(() => setProcessingTime(prev => prev + 1), 1000);
-    setProcessingTimer(timer);
-    
-    // Set timeout warning
-    const timeoutWarning = setTimeout(() => {
-      if (loading) setTimeoutWarningShown(true);
-    }, 40000); // Show warning after 40 seconds
-    
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      
-      // Upload and process file
-      const { data } = await axios.post(
-        `${BACKEND_URL}/process`,
-        formData,
-        { 
-          headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: MAX_TIMEOUT,
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress(percentCompleted);
-          }
+    // Upload and process file
+    const { data } = await axios.post(
+      `${BACKEND_URL}/process`,
+      formData,
+      { 
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: MAX_TIMEOUT,
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percentCompleted);
         }
-      );
-      
-      clearTimeout(timeoutWarning);
-      console.log("Received quiz data:", data);
-      
-      if (data.length === 0) {
-        setError("No questions were extracted from the PDF.");
-      } else {
-        setAllQuestions(data);
-        setNumQuestions(Math.min(10, data.length));
       }
-    } catch (err) {
-      clearTimeout(timeoutWarning);
-      console.error('Upload failed:', err);
-      if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-        setError(`Processing timeout: Your PDF may be too large or complex. Try a smaller PDF or fewer pages.`);
-      } else if (err.response && err.response.status === 504) {
-        setError(`Gateway Timeout: The server took too long. Try a smaller PDF or fewer pages.`);
-      } else {
-        setError(`Upload failed: ${err.message || 'Unknown error'}`);
-      }
-    } finally {
-      setLoading(false);
-      clearInterval(timer);
-      setProcessingTimer(null);
+    );
+    
+    clearTimeout(timeoutWarning);
+    
+    if (!data || !data.questions || data.questions.length === 0) {
+      setError("No questions were extracted from the PDF.");
+    } else {
+      setAllQuestions(data.questions);
+      setNumQuestions(Math.min(10, data.questions.length));
     }
-  };
+  } catch (err) {
+    clearTimeout(timeoutWarning);
+    
+    // Handle specific error cases
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      setError(
+        "Processing timeout: Your PDF may be too large or complex. " +
+        "Try a smaller PDF or fewer pages."
+      );
+    } else if (err.response) {
+      // Server responded with an error status
+      if (err.response.status === 504) {
+        setError(
+          "Gateway Timeout: The server took too long to process your PDF. " +
+          "Try a smaller file or select a page range."
+        );
+      } else if (err.response.status === 502) {
+        setError(
+          "Bad Gateway: The backend server is currently unavailable or starting up. " +
+          "Free-tier servers may take 1-2 minutes to initialize after a period of inactivity. " +
+          "Please wait a moment and try again."
+        );
+      } else {
+        setError(`Server error (${err.response.status}): ${err.response.data?.error || err.message}`);
+      }
+    } else {
+      setError(`Upload failed: ${err.message || 'Unknown error'}`);
+    }
+  } finally {
+    setLoading(false);
+    clearInterval(timer);
+    setProcessingTimer(null);
+  }
+};
 
   // Start quiz by shuffling and selecting questions
   const startQuiz = () => {
