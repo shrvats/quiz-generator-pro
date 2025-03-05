@@ -700,7 +700,6 @@ function App() {
       </header>
       <main className="app-main">
         <BackendStatusIndicator />
-        <WarmupButton />
         <MathJaxContext config={mathJaxConfig}>
           <QuizRenderer />
         </MathJaxContext>
